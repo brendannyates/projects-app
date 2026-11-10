@@ -6,14 +6,14 @@ const KEY = DEMO ? 'pp.demo.v1' : 'pp.data.v1';
 const UNDO = DEMO ? 'pp.demo.undo' : 'pp.data.undo';
 const SETTINGS = 'pp.settings.v1';
 
-const empty = () => ({ version: 1, projects: [], tasks: [], meta: { lastWorkbookSave: '', workbookName: '' } });
+const empty = () => ({ version: 1, projects: [], tasks: [], items: [], digest: [], meta: { lastWorkbookSave: '', workbookName: '' } });
 
 export function load() {
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) return normalise(JSON.parse(raw));
   } catch (e) { console.error('load failed', e); }
-  return DEMO ? demoData() : empty();
+  return normalise(DEMO ? demoData() : empty());
 }
 
 export function save(data) {
@@ -25,12 +25,21 @@ export function normalise(d) {
   out.meta = { ...out.meta, ...(d.meta || {}) };
   out.projects = (d.projects || []).map(p => ({
     id: p.id || uid(), name: String(p.name || 'Untitled project'), status: p.status || 'Active',
-    start: p.start || '', due: p.due || '', notes: p.notes || '', updated: p.updated || 0
+    start: p.start || '', due: p.due || '', notes: p.notes || '', refName: p.refName || '', refUrl: p.refUrl || '', updated: p.updated || 0
   }));
   out.tasks = (d.tasks || []).map(t => ({
     id: t.id || uid(), projectId: t.projectId || '', title: String(t.title || 'Untitled task'),
     status: t.status || 'To do', priority: t.priority || 'Normal',
-    start: t.start || '', due: t.due || '', doneOn: t.doneOn || '', remind: t.remind || '', reminded: t.reminded || '', notes: t.notes || '', updated: t.updated || 0
+    start: t.start || '', due: t.due || '', doneOn: t.doneOn || '', remind: t.remind || '', reminded: t.reminded || '', snooze: t.snooze || '', notes: t.notes || '', updated: t.updated || 0
+  }));
+  out.items = (d.items || []).map(i => ({
+    id: i.id || uid(), projectId: i.projectId || '', title: String(i.title || 'Untitled item'),
+    done: i.done ? 'Yes' : '', doneOn: i.done ? (i.doneOn || '') : '', notes: i.notes || '', updated: i.updated || 0
+  }));
+  out.digest = (d.digest || []).map(g => ({
+    id: g.id || uid(), date: g.date || '', kind: g.kind === 'meeting' ? 'meeting' : 'action', time: g.time || '',
+    title: String(g.title || ''), project: g.project || '', due: g.due || '', source: g.source || '', notes: g.notes || '',
+    status: ['added', 'dismissed'].includes(g.status) ? g.status : 'new', updated: g.updated || 0
   }));
   return out;
 }

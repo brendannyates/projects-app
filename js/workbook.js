@@ -36,6 +36,7 @@ function text(v) {
   }
   return String(v).trim();
 }
+function linkXl(v) { if (v && typeof v === 'object' && v.hyperlink) return String(v.hyperlink); return text(v); }
 function remindXl(v) {
   if (v instanceof Date) return `${fromXl(v)} ${pad(v.getUTCHours())}:${pad(v.getUTCMinutes())}`;
   if (typeof v === 'number') { const d = new Date(Date.UTC(1899, 11, 30) + Math.round(v * 1440) * 60000); return remindXl(d); }
@@ -68,32 +69,34 @@ export async function buildWorkbook(data, today) {
   const tl = wb.addWorksheet('Timeline', { views: [{ state: 'frozen', xSplit: 5, ySplit: 3, showGridLines: false }] });
   const ts = wb.addWorksheet('Tasks', { views: [{ state: 'frozen', ySplit: 1 }] });
   const ps = wb.addWorksheet('Projects', { views: [{ state: 'frozen', ySplit: 1 }] });
+  const cs = wb.addWorksheet('Checklist', { views: [{ state: 'frozen', ySplit: 1 }] });
+  const ds = wb.addWorksheet('Digest', { views: [{ state: 'frozen', ySplit: 1 }] });
   const rm = wb.addWorksheet('Read me', { views: [{ showGridLines: false }] });
 
   // ---- Tasks ----
   ts.columns = [
     { key: 'id', width: 13 }, { key: 'project', width: 28 }, { key: 'title', width: 42 },
     { key: 'status', width: 10 }, { key: 'priority', width: 10 }, { key: 'start', width: 12 },
-    { key: 'due', width: 12 }, { key: 'doneOn', width: 12 }, { key: 'remind', width: 16 }, { key: 'reminded', width: 10 },
+    { key: 'due', width: 12 }, { key: 'doneOn', width: 12 }, { key: 'remind', width: 16 }, { key: 'reminded', width: 10 }, { key: 'snooze', width: 16 },
     { key: 'notes', width: 60 }
   ];
   const taskRows = tasks.map(t => [t.id, pName[t.projectId] || '', t.title, t.status, t.priority,
-    toXl(t.start), toXl(t.due), toXl(t.doneOn), t.remind || '', t.reminded ? 'Yes' : '', t.notes]);
+    toXl(t.start), toXl(t.due), toXl(t.doneOn), t.remind || '', t.reminded ? 'Yes' : '', t.snooze || '', t.notes]);
   ts.addTable({
     name: 'tblTasks', ref: 'A1', headerRow: true,
     style: { theme: 'TableStyleLight1', showRowStripes: false },
-    columns: ['ID', 'Project', 'Task', 'Status', 'Priority', 'Start', 'Due', 'Done on', 'Remind at', 'Reminded', 'Notes'].map(name => ({ name, filterButton: true })),
-    rows: taskRows.length ? taskRows : [['', '', '', '', '', null, null, null, '', '', '']]
+    columns: ['ID', 'Project', 'Task', 'Status', 'Priority', 'Start', 'Due', 'Done on', 'Remind at', 'Reminded', 'Snoozed until', 'Notes'].map(name => ({ name, filterButton: true })),
+    rows: taskRows.length ? taskRows : [['', '', '', '', '', null, null, null, '', '', '', '']]
   });
   styleHeader(ts.getRow(1));
   ['F', 'G', 'H'].forEach(col => { ts.getColumn(col).numFmt = 'mmm d, yyyy'; });
   ts.getColumn('A').font = { name: FONT, color: { argb: C.faint }, size: 9 };
-  ts.getColumn('K').alignment = { wrapText: true, vertical: 'top' };
+  ts.getColumn('L').alignment = { wrapText: true, vertical: 'top' };
   ts.dataValidations.add(`B2:B${ROWS}`, { type: 'list', allowBlank: true, formulae: [`Projects!$B$2:$B$${ROWS}`] });
   ts.dataValidations.add(`D2:D${ROWS}`, { type: 'list', allowBlank: true, formulae: [`"${STATUSES.join(',')}"`] });
   ts.dataValidations.add(`E2:E${ROWS}`, { type: 'list', allowBlank: true, formulae: [`"${PRIORITIES.join(',')}"`] });
   ts.addConditionalFormatting({
-    ref: `A2:K${ROWS}`,
+    ref: `A2:L${ROWS}`,
     rules: [
       { type: 'expression', priority: 1, formulae: ['$D2="Done"'], style: { font: { color: { argb: C.faint } } } },
       { type: 'expression', priority: 2, formulae: ['AND(ISNUMBER($G2),$G2<TODAY())'],
@@ -107,26 +110,46 @@ export async function buildWorkbook(data, today) {
   ps.columns = [
     { key: 'id', width: 13 }, { key: 'name', width: 32 }, { key: 'status', width: 10 },
     { key: 'start', width: 12 }, { key: 'due', width: 12 }, { key: 'notes', width: 44 },
-    { key: 'open', width: 11 }, { key: 'done', width: 11 }, { key: 'pct', width: 10 }
+    { key: 'open', width: 11 }, { key: 'done', width: 11 }, { key: 'pct', width: 10 },
+    { key: 'items', width: 11 }, { key: 'checked', width: 11 }, { key: 'ref', width: 34 }, { key: 'refUrl', width: 50 }
   ];
   const projRows = data.projects.map((p, i) => {
     const r = i + 2;
     return [p.id, p.name, p.status, toXl(p.start), toXl(p.due), p.notes,
       { formula: `COUNTIFS(Tasks!$B:$B,B${r},Tasks!$D:$D,"<>Done",Tasks!$C:$C,"<>")` },
       { formula: `COUNTIFS(Tasks!$B:$B,B${r},Tasks!$D:$D,"Done")` },
-      { formula: `IF(G${r}+H${r}=0,"",H${r}/(G${r}+H${r}))` }];
+      { formula: `IF(G${r}+H${r}=0,"",H${r}/(G${r}+H${r}))` },
+      { formula: `COUNTIFS(Checklist!$B:$B,B${r},Checklist!$C:$C,"<>")` },
+      { formula: `COUNTIFS(Checklist!$B:$B,B${r},Checklist!$D:$D,"Yes")` }, p.refName || '', p.refUrl || ''];
   });
   ps.addTable({
     name: 'tblProjects', ref: 'A1', headerRow: true,
     style: { theme: 'TableStyleLight1', showRowStripes: false },
-    columns: ['ID', 'Project', 'Status', 'Start', 'Due', 'Notes', 'Open tasks', 'Done tasks', 'Progress'].map(name => ({ name, filterButton: true })),
-    rows: projRows.length ? projRows : [['', '', '', null, null, '', '', '', '']]
+    columns: ['ID', 'Project', 'Status', 'Start', 'Due', 'Notes', 'Open tasks', 'Done tasks', 'Progress', 'Checklist', 'Checked', 'Reference', 'Reference link'].map(name => ({ name, filterButton: true })),
+    rows: projRows.length ? projRows : [['', '', '', null, null, '', '', '', '', '', '', '', '']]
   });
   styleHeader(ps.getRow(1));
   ['D', 'E'].forEach(col => { ps.getColumn(col).numFmt = 'mmm d, yyyy'; });
   ps.getColumn('I').numFmt = '0%';
   ps.getColumn('A').font = { name: FONT, color: { argb: C.faint }, size: 9 };
   ps.dataValidations.add(`C2:C${ROWS}`, { type: 'list', allowBlank: true, formulae: [`"${PROJECT_STATUSES.join(',')}"`] });
+
+  // ---- Checklist: project components (not personal tasks) ----
+  cs.columns = [{ key: 'id', width: 13 }, { key: 'project', width: 30 }, { key: 'item', width: 56 }, { key: 'done', width: 8 }, { key: 'doneOn', width: 12 }, { key: 'notes', width: 60 }];
+  const items = [...(data.items || [])].sort((a, b) => (pOrder[a.projectId] ?? 1e6) - (pOrder[b.projectId] ?? 1e6) || (a.done ? 1 : 0) - (b.done ? 1 : 0));
+  const itemRows = items.map(i => [i.id, pName[i.projectId] || '', i.title, i.done ? 'Yes' : '', toXl(i.doneOn), i.notes]);
+  cs.addTable({
+    name: 'tblChecklist', ref: 'A1', headerRow: true,
+    style: { theme: 'TableStyleLight1', showRowStripes: false },
+    columns: ['ID', 'Project', 'Item', 'Done', 'Done on', 'Notes'].map(name => ({ name, filterButton: true })),
+    rows: itemRows.length ? itemRows : [['', '', '', '', null, '']]
+  });
+  styleHeader(cs.getRow(1));
+  cs.getColumn('E').numFmt = 'mmm d, yyyy';
+  cs.getColumn('A').font = { name: FONT, color: { argb: C.faint }, size: 9 };
+  cs.dataValidations.add(`B2:B${ROWS}`, { type: 'list', allowBlank: true, formulae: [`Projects!$B$2:$B$${ROWS}`] });
+  cs.dataValidations.add(`D2:D${ROWS}`, { type: 'list', allowBlank: true, formulae: ['"Yes"'] });
+  cs.addConditionalFormatting({ ref: `A2:F${ROWS}`, rules: [{ type: 'expression', priority: 1, formulae: ['$D2="Yes"'], style: { font: { color: { argb: C.faint } } } }] });
 
   // ---- Timeline (Gantt). Follows the Tasks sheet row by row; bars are conditional formats. ----
   const dated = data.tasks.flatMap(t => [t.start, t.due]).filter(Boolean).sort();
@@ -205,6 +228,22 @@ export async function buildWorkbook(data, today) {
     ]
   });
 
+  // ---- Digest: the 7 AM email and calendar run. Suggestions until you add or dismiss them. ----
+  ds.columns = [{ key: 'id', width: 13 }, { key: 'date', width: 12 }, { key: 'kind', width: 9 }, { key: 'time', width: 7 }, { key: 'title', width: 50 },
+    { key: 'project', width: 24 }, { key: 'due', width: 12 }, { key: 'source', width: 36 }, { key: 'notes', width: 70 }, { key: 'status', width: 10 }];
+  const keepFrom = addDays(today, -14);
+  const dg = (data.digest || []).filter(g => g.date >= keepFrom).sort((a, b) => b.date.localeCompare(a.date) || a.kind.localeCompare(b.kind) || a.time.localeCompare(b.time));
+  ds.addTable({
+    name: 'tblDigest', ref: 'A1', headerRow: true, style: { theme: 'TableStyleLight1', showRowStripes: false },
+    columns: ['ID', 'Date', 'Kind', 'Time', 'Title', 'Project', 'Due', 'Source', 'Notes', 'Status'].map(name => ({ name, filterButton: true })),
+    rows: dg.length ? dg.map(g => [g.id, toXl(g.date), g.kind, g.time, g.title, g.project, toXl(g.due), g.source, g.notes, g.status])
+                    : [['', null, '', '', '', '', null, '', '', '']]
+  });
+  styleHeader(ds.getRow(1));
+  ['B', 'G'].forEach(col => { ds.getColumn(col).numFmt = 'mmm d, yyyy'; });
+  ds.getColumn('I').alignment = { wrapText: true, vertical: 'top' };
+  ds.getColumn('A').font = { name: FONT, color: { argb: C.faint }, size: 9 };
+
   // ---- Read me ----
   rm.getColumn(1).width = 100;
   const lines = [
@@ -217,6 +256,7 @@ export async function buildWorkbook(data, today) {
     ['Keep the ID column. It is how the app matches rows. New rows can leave ID blank.', 10, false],
     ['Tasks: one row per task. Project must match a name on the Projects sheet (the dropdown helps). Status: To do, Doing, Done.', 10, false],
     ['Remind at: a date and time like 2026-11-12 09:00. The app shows a notification then, while it is open.', 10, false],
+    ['Checklist: the parts of each project. Your own to-dos go on Tasks. Put Yes in Done to check one off.', 10, false],
     ['Projects: Start and Due are optional. Open tasks, Done tasks and Progress are formulas.', 10, false],
     ['Timeline: follows the Tasks sheet row by row. Change the date in C1 to scroll. Weeks run Sunday to Saturday.', 10, false],
     ['', 10, false],
@@ -257,7 +297,7 @@ export async function readWorkbook(buffer) {
     const name = text(get('project'));
     if (!name) continue;
     const p = { id: text(get('id')) || uid(), name, status: pick(get('status'), PROJECT_STATUSES, 'Active'),
-      start: fromXl(get('start')), due: fromXl(get('due')), notes: text(get('notes')) };
+      start: fromXl(get('start')), due: fromXl(get('due')), notes: text(get('notes')), refName: text(get('reference')), refUrl: linkXl(get('reference link')) };
     projects.push(p); byName[name.toLowerCase()] = p;
   }
   const tasks = [];
@@ -270,8 +310,26 @@ export async function readWorkbook(buffer) {
     const status = pick(get('status'), STATUSES, 'To do');
     tasks.push({ id: text(get('id')) || uid(), projectId: p ? p.id : '', title, status,
       priority: pick(get('priority'), PRIORITIES, 'Normal'), start: fromXl(get('start')), due: fromXl(get('due')),
-      doneOn: status === 'Done' ? fromXl(get('done on')) : '', remind: remindXl(get('remind at')), reminded: /^y/i.test(text(get('reminded'))) ? 'Yes' : '',
+      doneOn: status === 'Done' ? fromXl(get('done on')) : '', remind: remindXl(get('remind at')), reminded: /^y/i.test(text(get('reminded'))) ? 'Yes' : '', snooze: remindXl(get('snoozed until')),
       notes: text(get('notes')) });
   }
-  return { projects, tasks };
+  const items = [];
+  for (const get of readSheet(wb.getWorksheet('Checklist'))) {
+    const title = text(get('item'));
+    if (!title) continue;
+    const pn = text(get('project'));
+    let p = pn ? byName[pn.toLowerCase()] : null;
+    if (pn && !p) { p = { id: uid(), name: pn, status: 'Active', start: '', due: '', notes: '' }; projects.push(p); byName[pn.toLowerCase()] = p; }
+    const done = /^y/i.test(text(get('done')));
+    items.push({ id: text(get('id')) || uid(), projectId: p ? p.id : '', title, done: done ? 'Yes' : '', doneOn: done ? fromXl(get('done on')) : '', notes: text(get('notes')) });
+  }
+  const digest = [];
+  for (const get of readSheet(wb.getWorksheet('Digest'))) {
+    const title = text(get('title'));
+    if (!title) continue;
+    digest.push({ id: text(get('id')) || uid(), date: fromXl(get('date')), kind: text(get('kind')) === 'meeting' ? 'meeting' : 'action',
+      time: text(get('time')), title, project: text(get('project')), due: fromXl(get('due')), source: text(get('source')),
+      notes: text(get('notes')), status: ['added', 'dismissed'].includes(text(get('status'))) ? text(get('status')) : 'new' });
+  }
+  return { projects, tasks, items, digest };
 }

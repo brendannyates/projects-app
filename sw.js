@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION whenever a file changes.
-const VERSION = 'projects-v3';
+const VERSION = 'projects-v4';
 const SHELL = [
   './', './index.html', './manifest.webmanifest',
   './css/app.css', './js/core.js', './js/store.js', './js/workbook.js', './js/ops.js', './js/app.js',

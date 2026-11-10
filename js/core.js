@@ -111,8 +111,8 @@ export function projectStatusText(p, s, today) {
 }
 
 // Today view groups. Each open task lands in exactly one group.
-export function todayGroups(tasks, today) {
-  const open = tasks.filter(t => t.status !== 'Done');
+export function todayGroups(tasks, today, nowText = '') {
+  const open = tasks.filter(t => t.status !== 'Done' && !(nowText && t.snooze && t.snooze > nowText));
   const horizon = addDays(today, 7);
   const g = { late: [], soon: [], doing: [], next: [], later: [] };
   for (const t of open) {

@@ -26,6 +26,8 @@ const PX = { day: 32, week: 12, quarter: 4 };
 
 const proj = id => st.data.projects.find(p => p.id === id);
 const task = id => st.data.tasks.find(t => t.id === id);
+const item = id => st.data.items.find(i => i.id === id);
+const tickBtn = t => `<button class="tick ${t.status === 'Done' ? 'on' : t.status === 'Doing' ? 'doing' : ''}" data-act="toggle" data-id="${t.id}" aria-label="${esc(t.status === 'Done' ? `Reopen ${t.title}` : `Mark ${t.title} done`)}">✓</button>`;
 const pname = id => (id && proj(id)?.name) || 'No project';
 
 // ---------- saving ----------
@@ -33,10 +35,10 @@ const pname = id => (id && proj(id)?.name) || 'No project';
 // with edits another device saved to the workbook in the meantime.
 let baseline = new Map();
 const recJson = r => { const { updated, ...rest } = r; return JSON.stringify(rest); };
-function primeStamps() { baseline = new Map([...st.data.projects, ...st.data.tasks].map(r => [r.id, recJson(r)])); }
+function primeStamps() { baseline = new Map([...st.data.projects, ...st.data.tasks, ...st.data.items, ...st.data.digest].map(r => [r.id, recJson(r)])); }
 function stamp() {
   const now = Date.now(), seen = new Map();
-  for (const r of [...st.data.projects, ...st.data.tasks]) {
+  for (const r of [...st.data.projects, ...st.data.tasks, ...st.data.items, ...st.data.digest]) {
     const j = recJson(r);
     if (baseline.get(r.id) !== j) r.updated = now;
     seen.set(r.id, j);
@@ -70,7 +72,7 @@ function toast(msg, undo) {
 function render() {
   document.querySelectorAll('.rail .item[data-view]').forEach(b => { if (b.dataset.view === st.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   document.querySelectorAll('.view').forEach(v => { v.hidden = v.id !== 'v-' + st.view; });
-  const g = C.todayGroups(st.data.tasks, st.today);
+  const g = C.todayGroups(st.data.tasks, st.today, stampText());
   const c = $('#cToday'); c.hidden = !g.late.length; c.textContent = g.late.length;
   $('#cBook').hidden = !needsBackup();
   ({ today: renderToday, week: renderWeek, projects: renderProjects, timeline: renderTimeline, workbook: renderWorkbook })[st.view]();
@@ -134,7 +136,7 @@ function renderToday() {
   const now = new Date();
   $('#clockT').textContent = `${now.getHours()}:${C.pad(now.getMinutes())}`;
   $('#clockD').textContent = C.fmtLong(st.today);
-  const g = C.todayGroups(st.data.tasks, st.today);
+  const g = C.todayGroups(st.data.tasks, st.today, stampText());
   const rems = st.data.tasks.filter(t => t.remind && !t.reminded && t.status !== 'Done' && t.remind.startsWith(st.today)).length;
   $('#todaySub').innerHTML = [...C.todaySubline(g), ...(rems ? [{ text: `${C.plural(rems, 'reminder')} today` }] : [])].map(p => p.loud ? `<strong>${esc(p.text)}</strong>` : esc(p.text)).join(', ');
 
@@ -152,12 +154,40 @@ function renderToday() {
       ${list.length ? shown.map(t => taskRow(t)).join('') : `<p class="empty">${emptyMsg}</p>`}
       ${cap && list.length > cap && !st.showAllLater ? `<button class="btn sm ghost" data-act="more">Show all ${list.length}</button>` : ''}</div>`;
   }
-  $('#todayLists').innerHTML = html;
+  const snoozed = st.data.tasks.filter(t => t.status !== 'Done' && t.snooze && t.snooze > stampText()).sort((a, b) => a.snooze.localeCompare(b.snooze));
+  if (snoozed.length) html += `<div class="card group"><div class="gh"><h2>Snoozed</h2><span>${snoozed.length}</span></div>
+    ${snoozed.map(t => `<div class="trow" data-state="open">${tickBtn(t)}<button class="tmain" data-act="select" data-id="${t.id}"><b>${esc(t.title)}</b><small>${esc(pname(t.projectId))}</small></button><span class="st">Back ${esc(remindText(t.snooze))}</span></div>`).join('')}</div>`;
+  $('#todayLists').innerHTML = digestCard() + html;
 
   if (!st.selTask || !task(st.selTask)) st.selTask = (g.late[0] || g.soon[0] || g.doing[0] || g.next[0] || g.later[0] || {}).id || null;
   $('#todayDetail').innerHTML = taskDetail(st.selTask && task(st.selTask));
   // re-mark selection after choosing default
   document.querySelectorAll('#todayLists .trow').forEach(r => r.classList.toggle('sel', r.querySelector('.tmain').dataset.id === st.selTask));
+}
+
+function refBlock(p) {
+  if (!p.refUrl) return `<p class="hint" style="margin:6px 0 0"><button class="btn sm ghost" data-act="editproj" data-id="${p.id}" style="padding:0 6px">Add a reference file</button> Link the latest build sheet or flow page.</p>`;
+  const web = /^https?:\/\//i.test(p.refUrl);
+  return `<div class="ref"><span class="muted">Reference</span>
+    ${web ? `<a href="${esc(p.refUrl)}" target="_blank" rel="noopener">${esc(p.refName || 'Open file')}</a>` : `<span>${esc(p.refName || p.refUrl)}</span><button class="btn sm ghost" data-act="copyref" data-id="${p.id}">Copy path</button>`}</div>`;
+}
+
+function digestCard() {
+  const items = st.data.digest.filter(g => g.date === st.today);
+  const older = st.data.digest.filter(g => g.kind === 'action' && g.status === 'new' && g.date < st.today && g.date >= C.addDays(st.today, -3));
+  const meetings = items.filter(g => g.kind === 'meeting').sort((a, b) => a.time.localeCompare(b.time));
+  const actions = [...items.filter(g => g.kind === 'action' && g.status === 'new'), ...older];
+  const handled = items.filter(g => g.kind === 'action' && g.status !== 'new').length;
+  if (!meetings.length && !actions.length) return '';
+  const meet = g => `<div class="dgm"><span class="dgt">${esc(g.time.replace(/^0/, ''))}</span><div><b>${esc(g.title)}</b>
+      ${g.notes ? `<p class="notes">${esc(g.notes)}</p>` : ''}</div>
+      ${g.status === 'new' ? `<button class="btn sm ghost" data-act="dgadd" data-id="${g.id}">Add prep to my day</button>` : `<span class="st">${g.status === 'added' ? 'Added' : ''}</span>`}</div>`;
+  const act = g => `<div class="dga"><div><b>${esc(g.title)}</b><small>${esc([g.source, g.project, g.due ? C.dueText({ status: 'To do', due: g.due }, st.today) : '', g.date < st.today ? `from ${C.fmtShort(g.date)}` : ''].filter(Boolean).join(' · '))}</small>
+      ${g.notes ? `<p class="notes">${esc(g.notes)}</p>` : ''}</div>
+      <span class="dgbtn"><button class="btn sm ghost" data-act="dgadd" data-id="${g.id}">Add to my day</button><button class="btn sm mute" data-act="dgdismiss" data-id="${g.id}">Dismiss</button></span></div>`;
+  return `<div class="card group digest"><div class="gh"><h2>Morning digest</h2><span>${actions.length ? `${actions.length} to review` : 'All reviewed'}${handled ? `, ${handled} handled` : ''}${actions.length > 3 ? ` <button class="btn sm mute" data-act="dgdismissall">Dismiss all</button>` : ''}</span></div>
+    ${meetings.length ? `<div class="dgsec"><h3>On your calendar</h3>${meetings.map(meet).join('')}</div>` : ''}
+    ${actions.length ? `<div class="dgsec"><h3>From your email</h3>${actions.map(act).join('')}</div>` : ''}</div>`;
 }
 
 function notesSection(kind, rec) {
@@ -183,12 +213,14 @@ function taskDetail(t) {
       ${fact('Start', t.start ? C.fmtDay(t.start) : '<span class="muted">Not set</span>')}
       ${fact('Due', t.due ? C.fmtDay(t.due) : '<span class="muted">Not set</span>')}
       ${t.doneOn ? fact('Done', C.fmtDay(t.doneOn)) : ''}
+      ${t.snooze && t.snooze > stampText() ? fact('Snoozed', `until ${remindText(t.snooze)}`) : ''}
       ${t.remind ? fact('Reminder', `<span class="rem">${remindText(t.remind)}</span>${t.reminded ? ' <span class="muted">(sent)</span>' : ''}`) : ''}
     </dl>
     <button class="btn primary" data-act="advance" data-id="${t.id}" data-status="${na.status}">${na.label}</button>
     ${t.status !== 'Done' ? `<div class="actions">
       <button class="btn sm ghost" data-act="tomorrow" data-id="${t.id}">Move to tomorrow</button>
       <button class="btn sm ghost" data-act="week" data-id="${t.id}">Push 1 week</button>
+      ${t.snooze && t.snooze > stampText() ? `<button class="btn sm ghost" data-act="unsnooze" data-id="${t.id}">Unsnooze</button>` : `<button class="btn sm ghost" data-act="snooze" data-id="${t.id}">Snooze</button>`}
       ${t.remind ? `<button class="btn sm ghost" data-act="clearremind" data-id="${t.id}">Clear reminder</button>` : `<button class="btn sm ghost" data-act="edit" data-id="${t.id}">Set reminder</button>`}
       <button class="btn sm mute" data-act="delete" data-id="${t.id}">Delete</button></div>`
       : `<div class="actions"><button class="btn sm mute" data-act="delete" data-id="${t.id}">Delete</button></div>`}
@@ -219,7 +251,7 @@ function renderWeek() {
 }
 function chip(t) {
   const s = C.taskState(t, st.today);
-  return `<button class="chip" draggable="true" data-state="${s}" data-act="edit" data-id="${t.id}">${esc(t.title)}<small>${esc(pname(t.projectId))}${t.priority === 'High' ? ' · High' : ''}${s === 'late' ? ' · ' + esc(C.dueText(t, st.today)) : ''}</small></button>`;
+  return `<div class="chip" draggable="true" data-state="${s}" data-id="${t.id}">${tickBtn(t)}<button class="cbody" data-act="edit" data-id="${t.id}">${esc(t.title)}<small>${esc(pname(t.projectId))}${t.priority === 'High' ? ' · High' : ''}${s === 'late' ? ' · ' + esc(C.dueText(t, st.today)) : ''}</small></button></div>`;
 }
 
 // ----- Projects -----
@@ -251,10 +283,12 @@ function renderProjects() {
 }
 function projRow(id, name, s, status, p) {
   const sub = [p?.status === 'On hold' ? 'On hold' : '', p?.start || p?.due ? [p.start && C.fmtShort(p.start), p.due && C.fmtShort(p.due)].filter(Boolean).join(' to ') : ''].filter(Boolean).join(' · ');
-  const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+  const its = st.data.items.filter(i => i.projectId === id && id), chk = its.filter(i => i.done).length;
+  const all = s.total + its.length, pct = all ? Math.round((s.done + chk) / all * 100) : 0;
+  const counts = [s.total ? `${s.open} open ${s.open === 1 ? 'task' : 'tasks'}` : '', its.length ? `${chk} of ${its.length} checked` : ''].filter(Boolean).join(' · ') || 'Nothing yet';
   return `<button class="prow" data-state="${s.state}" data-act="selproj" data-id="${id}" aria-label="${esc(name)}, ${esc(status)}">
-    <span><b>${esc(name)}</b><small>${sub || C.plural(s.total, 'task')}</small></span>
-    <span class="prog"><span class="bar"><i style="width:${pct}%"></i></span>${s.done} of ${s.total} done</span>
+    <span><b>${esc(name)}</b><small>${sub || counts}</small></span>
+    <span class="prog"><span class="bar"><i style="width:${pct}%"></i></span>${counts}</span>
     <span class="st">${esc(status)}</span></button>`;
 }
 function projectDetail(id) {
@@ -263,21 +297,31 @@ function projectDetail(id) {
   const s = C.projectStats(p || { id: '', status: 'Active' }, st.data.tasks, st.today);
   const tasks = C.sortTasks(st.data.tasks.filter(t => t.projectId === id), st.today);
   const open = tasks.filter(t => t.status !== 'Done'), done = tasks.filter(t => t.status === 'Done');
-  const mini = t => { const ts = C.taskState(t, st.today); return `<div class="mini" data-state="${ts}"><button data-act="edit" data-id="${t.id}">${esc(t.title)}</button><span class="st">${esc(C.dueText(t, st.today))}</span></div>`; };
+  const mini = t => { const ts = C.taskState(t, st.today); return `<div class="mini" data-state="${ts}">${tickBtn(t)}<button data-act="edit" data-id="${t.id}">${esc(t.title)}</button><span class="st">${esc(C.dueText(t, st.today))}</span></div>`; };
+  const its = id ? st.data.items.filter(i => i.projectId === id).sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0)) : [];
+  const chk = its.filter(i => i.done).length;
+  const checklist = !p ? '' : `<div class="section"><div class="sh"><h2>Checklist</h2><span>${its.length ? `${chk} of ${its.length} checked` : 'The parts of this project'}</span></div>
+      ${its.map(i => `<div class="citem${i.done ? ' done' : ''}">
+        <button class="tick ${i.done ? 'on' : ''}" data-act="toggleitem" data-id="${i.id}" aria-label="${esc(i.done ? `Uncheck ${i.title}` : `Check off ${i.title}`)}">✓</button>
+        <span class="ct" title="${esc(i.notes)}">${esc(i.title)}${i.notes ? `<small>${esc(i.notes.split('\n').pop())}</small>` : ''}</span>
+        <button class="x sm" data-act="itemtask" data-id="${i.id}" title="Make this one of my tasks" aria-label="Make ${esc(i.title)} a task">+</button>
+        <button class="x sm" data-act="delitem" data-id="${i.id}" title="Remove from checklist" aria-label="Remove ${esc(i.title)}">×</button></div>`).join('')}
+      <form class="quick" data-act="additem" data-id="${p.id}"><input name="item" placeholder="Add a checklist item" aria-label="New checklist item" required><button class="btn sm ghost" type="submit">Add</button></form></div>`;
   const lead = p ? C.projectStatusText(p, s, st.today) : `${s.open} open`;
   return `<div class="dh"><div><div class="name">${esc(p ? p.name : 'No project')}</div>
       <div class="meta">${p ? `${esc(p.status)}${p.start ? ' · Starts ' + C.fmtShort(p.start) : ''}${p.due ? ' · Due ' + C.fmtShort(p.due) : ''}` : 'Tasks not filed under a project'}</div></div>
       ${p ? `<button class="btn sm mute" data-act="editproj" data-id="${p.id}">Edit</button>` : ''}</div>
     <p class="lead" data-state="${s.state}">${esc(lead)}</p>
-    <div class="prog" style="margin:10px 0 4px"><span class="bar"><i style="width:${s.total ? s.done / s.total * 100 : 0}%"></i></span>${s.done} of ${s.total} done</div>
+    ${p ? refBlock(p) : ''}
+    <div class="section"><div class="sh"><h2>My tasks</h2><span>${open.length} open</span></div>
     <form class="quick" data-act="quickadd" data-id="${id}">
       <input name="title" placeholder="Add a task" aria-label="New task title" required>
       <input name="due" type="date" aria-label="Due date" style="flex:0 0 138px">
       <button class="btn sm ghost" type="submit">Add</button>
     </form>
-    <div class="section"><div class="sh"><h2>Open</h2><span>${open.length}</span></div>
-      ${open.length ? open.map(mini).join('') : '<p class="muted" style="margin:0;font-size:14px">Nothing open.</p>'}</div>
-    ${done.length ? `<div class="section"><div class="sh"><h2>Done</h2><span>${done.length}</span></div>${done.map(mini).join('')}</div>` : ''}
+      <div style="margin-top:8px">${open.length ? open.map(mini).join('') : '<p class="muted" style="margin:0;font-size:14px">No open tasks.</p>'}
+      ${done.length ? `<details class="donelist"><summary>${done.length} done</summary>${done.map(mini).join('')}</details>` : ''}</div></div>
+    ${checklist}
     ${p ? `<div class="actions" style="margin-top:16px">
       ${p.status !== 'Done' ? `<button class="btn sm ghost" data-act="projdone" data-id="${p.id}">Mark project done</button>` : `<button class="btn sm ghost" data-act="projactive" data-id="${p.id}">Reopen project</button>`}
       ${p.status === 'Active' ? `<button class="btn sm mute" data-act="projhold" data-id="${p.id}">Put on hold</button>` : ''}
@@ -345,7 +389,7 @@ function renderTimeline() {
         ? `<span class="tbar diamond" data-state="${ts}" data-id="${t.id}" style="left:${left + px / 2 - 8}px" title="${esc(t.title)}: ${esc(C.dueText(t, st.today))}"></span>`
         : `<span class="tbar" data-state="${ts}" data-id="${t.id}" style="left:${left}px;width:${w}px" title="${esc(t.title)}: ${C.fmtShort(b.s)} to ${C.fmtShort(b.e)}"><span class="grip"></span></span>`;
       const tagLeft = single ? left + px / 2 + 14 : left + w + 8;
-      rows += `<div class="tlrow" data-state="${ts}"><div class="tllabel"><button data-act="edit" data-id="${t.id}">${esc(t.title)}</button><span class="lst">${esc(C.dueText(t, st.today))}</span></div>
+      rows += `<div class="tlrow" data-state="${ts}"><div class="tllabel">${tickBtn(t)}<button data-act="edit" data-id="${t.id}">${esc(t.title)}</button><span class="lst">${esc(C.dueText(t, st.today))}</span></div>
         <div class="track" style="width:${width}px;${grid}">${bar}<span class="btag" style="left:${tagLeft}px">${ts === 'late' ? esc(C.dueText(t, st.today)) : t.due ? C.fmtShort(t.due) : ''}</span></div></div>`;
     }
   }
@@ -496,7 +540,7 @@ function merge(file, local, lastSync) {
     for (const r of fromLocal) if (!lastSync || (r.updated || 0) > lastSync) out.set(r.id, r);
     return [...out.values()];
   };
-  return S.normalise({ projects: pick(file.projects, local.projects), tasks: pick(file.tasks, local.tasks), meta: local.meta });
+  return S.normalise({ projects: pick(file.projects, local.projects), tasks: pick(file.tasks, local.tasks), items: pick(file.items || [], local.items || []), digest: pick(file.digest || [], local.digest || []), meta: local.meta });
 }
 
 async function syncNow({ ask = false } = {}) {
@@ -672,6 +716,7 @@ function checkReminders() {
   if (!due.length) return;
   for (const t of due) {
     t.reminded = 'Yes';
+    if (t.snooze) t.snooze = '';
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
         const n = new Notification(t.title, { body: `${pname(t.projectId)} · ${C.dueText(t, st.today)}`, tag: t.id, icon: 'icons/icon-192.png', requireInteraction: true });
@@ -759,6 +804,7 @@ function openProject(id) {
     ${field('Project', `<input name="name" required maxlength="120" value="${esc(p.name)}">`)}
     ${field('Status', `<select name="status">${options(C.PROJECT_STATUSES, p.status)}</select>`)}
     <div class="row2">${field('Start (optional)', `<input type="date" name="start" value="${p.start}">`)}${field('Due (optional)', `<input type="date" name="due" value="${p.due}">`)}</div>
+    <div class="row2">${field('Reference file (optional)', `<input name="refName" maxlength="120" placeholder="Build sheet" value="${esc(p.refName || '')}">`)}${field('Link or path', `<input name="refUrl" maxlength="600" placeholder="https://...sharepoint.com/..." value="${esc(p.refUrl || '')}">`)}</div>
     ${field('Notes', `<textarea name="notes" maxlength="4000">${esc(p.notes)}</textarea>`)}
     <div class="err" id="dlgErr"></div>
     <div class="mfoot">${id ? `<button class="btn sm danger" value="delete" formnovalidate>Delete project</button>` : '<span></span>'}
@@ -771,12 +817,36 @@ function openProject(id) {
     if (f.start && f.due && f.start > f.due) { e.preventDefault(); $('#dlgErr').textContent = 'Start is after the due date. Change one of them.'; return; }
     const undo = snapshotFor();
     const target = id ? p : { id: C.uid() };
-    Object.assign(target, { name: f.name.trim(), status: f.status, start: f.start, due: f.due, notes: f.notes.trim() });
+    Object.assign(target, { name: f.name.trim(), status: f.status, start: f.start, due: f.due, notes: f.notes.trim(), refName: f.refName.trim(), refUrl: f.refUrl.trim() });
     if (!id) { st.data.projects.push(target); st.selProject = target.id; if (st.projFilter !== 'all' && target.status !== 'Active') st.projFilter = 'all'; }
     commit(id ? 'Project saved' : `Added ${target.name}`, undo);
   };
   dlg.showModal();
   form.name.focus();
+}
+
+function openSnooze(id) {
+  const t = task(id), now = new Date();
+  const at = (h, addDays = 0) => { const d = new Date(); d.setDate(d.getDate() + addDays); d.setHours(h, 0, 0, 0); return d; };
+  const plus = hrs => new Date(now.getTime() + hrs * 3600000);
+  const mon = at(9, ((8 - now.getDay()) % 7) || 7);
+  const opts = [['In 1 hour', plus(1)], ['In 3 hours', plus(3)], ['Tomorrow 9:00', at(9, 1)], [`Monday 9:00`, mon]];
+  form.innerHTML = `<div class="mh"><h2>Snooze ${esc(t.title)}</h2><button class="x" value="cancel" aria-label="Close">×</button></div>
+    <p class="muted" style="margin:-6px 0 14px">It leaves Today and comes back with a reminder.</p>
+    <div class="snz">${opts.map(([l, d], i) => `<button class="btn ghost" value="opt${i}">${l}<small>${C.fmtDay(C.iso(d))}, ${d.getHours()}:${C.pad(d.getMinutes())}</small></button>`).join('')}</div>
+    ${field('Or pick a date and time', `<input type="datetime-local" name="until" value="${stampText(at(9, 1)).replace(' ', 'T')}">`)}
+    <div class="mfoot"><span></span><span><button class="btn mute" value="cancel" formnovalidate>Cancel</button> <button class="btn primary" value="pick">Snooze until then</button></span></div>`;
+  form.onsubmit = e => {
+    const v = e.submitter?.value;
+    if (v === 'cancel') return;
+    const until = v === 'pick' ? normRemind(form.until.value) : stampText(opts[Number(v.slice(3))][1]);
+    if (!until) { e.preventDefault(); return; }
+    const undo = snapshotFor();
+    t.snooze = until; t.remind = until; t.reminded = '';
+    askNotify();
+    commit(`Snoozed until ${remindText(until)}`, undo);
+  };
+  dlg.showModal();
 }
 
 function removeTask(id) {
@@ -792,6 +862,7 @@ function removeProject(id) {
   if (n && !confirm(`Delete ${p.name}? Its ${C.plural(n, 'task')} move to No project.`)) return;
   const undo = snapshotFor();
   st.data.tasks.forEach(t => { if (t.projectId === id) t.projectId = ''; });
+  st.data.items = st.data.items.filter(i => i.projectId !== id);
   st.data.projects = st.data.projects.filter(x => x.id !== id);
   st.selProject = null;
   commit(`Deleted ${p.name}`, undo);
@@ -839,6 +910,36 @@ document.addEventListener('click', e => {
     case 'syncnow': syncNow({ ask: true }); break;
     case 'reconnect': syncNow({ ask: true }); break;
     case 'undoload': { const d = S.restoreSnapshot(); if (d) { st.handle = null; S.setHandle(null); st.data = d; Object.assign(st.data.meta, { dirty: false, fileModified: null, lastSync: 0 }); primeStamps(); S.save(st.data); render(); toast('Put back your earlier data. Syncing is off.'); } break; }
+    case 'toggleitem': { const it = item(id), undo = snapshotFor(); it.done = it.done ? '' : 'Yes'; it.doneOn = it.done ? st.today : ''; commit(it.done ? `Checked off ${it.title}` : `Unchecked ${it.title}`, undo); break; }
+    case 'delitem': { const it = item(id), undo = snapshotFor(); st.data.items = st.data.items.filter(i => i !== it); commit(`Removed ${it.title} from the checklist`, undo); break; }
+    case 'itemtask': {
+      const it = item(id), undo = snapshotFor();
+      const t = { id: C.uid(), projectId: it.projectId, title: it.title, status: 'To do', priority: 'Normal', start: '', due: '', doneOn: '', remind: '', reminded: '', notes: it.notes };
+      st.data.tasks.push(t); st.data.items = st.data.items.filter(i => i !== it); st.selTask = t.id;
+      commit(`${t.title} is now one of your tasks`, undo); break;
+    }
+    case 'snooze': openSnooze(id); break;
+    case 'unsnooze': { const undo = snapshotFor(); t.snooze = ''; t.remind = ''; t.reminded = ''; commit(`${t.title} is back`, undo); break; }
+    case 'copyref': { const p = proj(id); navigator.clipboard?.writeText(p.refUrl).then(() => toast('Path copied. Paste it into File Explorer.')); break; }
+    case 'dgadd': case 'dgdismiss': {
+      const g = st.data.digest.find(x => x.id === id), undo = snapshotFor();
+      if (el.dataset.act === 'dgdismiss') { g.status = 'dismissed'; commit('Dismissed', undo); break; }
+      const pm = g.project ? st.data.projects.find(p => p.name.toLowerCase() === g.project.toLowerCase()) : null;
+      const nt = { id: C.uid(), projectId: pm ? pm.id : '', title: g.kind === 'meeting' ? `Prep: ${g.title}` : g.title, status: 'To do', priority: 'Normal',
+        start: '', due: g.due || st.today, doneOn: '', remind: '', reminded: '', snooze: '', notes: [g.source, g.notes].filter(Boolean).join('\n') };
+      if (g.kind === 'meeting' && /^\d{1,2}:\d{2}$/.test(g.time)) {
+        const [h, m] = g.time.split(':').map(Number), d = new Date(); d.setHours(h, m - 30, 0, 0);
+        if (d > new Date()) nt.remind = stampText(d);
+      }
+      if (pm && g.source === 'Suggested by Claude') st.data.items = st.data.items.filter(i => !(i.projectId === pm.id && i.title.toLowerCase() === g.title.toLowerCase() && !i.done));
+      st.data.tasks.push(nt); g.status = 'added'; st.selTask = nt.id;
+      commit(`Added ${nt.title} to your day`, undo); break;
+    }
+    case 'dgdismissall': {
+      const undo = snapshotFor(), list = st.data.digest.filter(g => g.kind === 'action' && g.status === 'new' && g.date >= C.addDays(st.today, -3));
+      list.forEach(g => { g.status = 'dismissed'; });
+      commit(`Dismissed ${C.plural(list.length, 'suggestion')}. They stay on the project checklists.`, undo); break;
+    }
     case 'clearremind': { const undo = snapshotFor(); t.remind = ''; t.reminded = ''; commit('Reminder cleared', undo); break; }
     case 'inboxlink': linkInbox(); break;
     case 'inboxunlink': st.inbox = null; S.setHandle(null, 'inbox'); render(); toast('Inbox disconnected. The file stays in OneDrive.'); break;
@@ -856,6 +957,16 @@ document.addEventListener('submit', e => {
     const undo = snapshotFor();
     addNote(rec, text);
     commit('Note added', undo);
+    return;
+  }
+  const ai = e.target.closest('form[data-act="additem"]');
+  if (ai) {
+    e.preventDefault();
+    const title = ai.item.value.trim(); if (!title) return;
+    const undo = snapshotFor();
+    st.data.items.push({ id: C.uid(), projectId: ai.dataset.id, title, done: '', doneOn: '', notes: '' });
+    commit(`Added ${title} to the checklist`, undo);
+    requestAnimationFrame(() => document.querySelector('form[data-act="additem"] input')?.focus());
     return;
   }
   const f = e.target.closest('form[data-act="quickadd"]');
