@@ -16,6 +16,7 @@ const st = {
   projFilter: 'active',
   handle: null,
   persisted: 'unknown',
+  sync: 'ok',
   installPrompt: null
 };
 const FSA = 'showSaveFilePicker' in window;
@@ -27,15 +28,30 @@ const task = id => st.data.tasks.find(t => t.id === id);
 const pname = id => (id && proj(id)?.name) || 'No project';
 
 // ---------- saving ----------
-let autoTimer = null;
+// Every record gets an `updated` stamp when it changes, so edits made here can be merged
+// with edits another device saved to the workbook in the meantime.
+let baseline = new Map();
+const recJson = r => { const { updated, ...rest } = r; return JSON.stringify(rest); };
+function primeStamps() { baseline = new Map([...st.data.projects, ...st.data.tasks].map(r => [r.id, recJson(r)])); }
+function stamp() {
+  const now = Date.now(), seen = new Map();
+  for (const r of [...st.data.projects, ...st.data.tasks]) {
+    const j = recJson(r);
+    if (baseline.get(r.id) !== j) r.updated = now;
+    seen.set(r.id, j);
+  }
+  const changed = seen.size !== baseline.size || [...seen].some(([id, j]) => baseline.get(id) !== j);
+  baseline = seen;
+  return changed;
+}
+
+let syncTimer = null;
 function commit(msg, undo) {
+  if (stamp() && st.handle) st.data.meta.dirty = true;
   S.save(st.data);
   render();
   if (msg) toast(msg, undo);
-  if (st.settings.autoSave && st.handle) {
-    clearTimeout(autoTimer);
-    autoTimer = setTimeout(() => saveToWorkbook({ quiet: true }), 4000);
-  }
+  if (st.handle) { clearTimeout(syncTimer); syncTimer = setTimeout(() => syncNow(), 2000); }
 }
 function snapshotFor(fn) { const before = JSON.stringify(st.data); return () => { st.data = S.normalise(JSON.parse(before)); fn?.(); commit('Undone'); }; }
 
@@ -61,12 +77,25 @@ function render() {
 }
 
 function renderConn() {
-  const dot = $('#connDot'), txt = $('#connText');
-  if (S.DEMO) { dot.className = 'cdot warn'; txt.textContent = 'Demo data'; return; }
-  if (st.handle && st.data.meta.lastWorkbookSave) {
-    dot.className = needsBackup() ? 'cdot warn' : 'cdot';
-    txt.textContent = `Workbook saved ${relTime(st.data.meta.lastWorkbookSave)}`;
-  } else { dot.className = 'cdot'; txt.textContent = 'Saved on this PC'; }
+  const dot = $('#connDot'), txt = $('#connText'), ban = $('#syncBanner');
+  let warn = false, line, banner = '';
+  const name = st.handle?.name || 'the workbook';
+  if (S.DEMO) { warn = true; line = 'Demo data'; }
+  else if (!st.handle) { warn = st.data.tasks.length > 0; line = 'On this PC only'; }
+  else if (st.sync === 'needperm') {
+    warn = true; line = 'Workbook not connected';
+    banner = `<span>Reconnect to ${esc(name)} to load the latest from OneDrive. When Edge asks, choose <b>Allow on every visit</b> so it stops asking.</span><button class="btn sm primary" data-act="reconnect">Reconnect workbook</button>`;
+  } else if (st.sync === 'locked') {
+    warn = true; line = 'Waiting for Excel to close';
+    banner = `<span>Changes aren't in ${esc(name)} yet because it's open in Excel. Close it there and they save within 30 sec. Your changes are kept here.</span>`;
+  } else if (st.sync === 'error') {
+    warn = true; line = "Couldn't reach the workbook";
+    banner = `<span>Couldn't reach ${esc(name)}. Check OneDrive is running and the file hasn't moved. Your changes are kept here.</span><button class="btn sm ghost" data-act="syncnow">Try again</button><button class="btn sm mute" data-act="wbopen">Find the file</button>`;
+  } else if (st.data.meta.dirty) line = 'Saving to OneDrive...';
+  else line = st.data.meta.lastSync ? `Synced ${relTime(new Date(st.data.meta.lastSync).toISOString())}` : 'Connecting...';
+  dot.className = warn ? 'cdot warn' : 'cdot';
+  txt.textContent = line;
+  ban.hidden = !banner; ban.innerHTML = banner;
 }
 function relTime(isoTs) {
   const d = new Date(isoTs), day = C.iso(d);
@@ -76,9 +105,9 @@ function relTime(isoTs) {
   return `${C.fmtShort(day)}`;
 }
 function needsBackup() {
-  if (S.DEMO || !st.data.tasks.length) return false;
-  const last = st.data.meta.lastWorkbookSave;
-  return !last || C.diffDays(C.iso(new Date(last)), st.today) >= 7;
+  if (S.DEMO) return false;
+  if (st.handle) return ['needperm', 'locked', 'error'].includes(st.sync);
+  return st.data.tasks.length > 0;
 }
 
 function taskRow(t, opts = {}) {
@@ -359,45 +388,73 @@ function initTimelineDrag() {
 }
 
 // ----- Workbook -----
+const XLSX_TYPE = { description: 'Excel workbook', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } };
 function renderWorkbook() {
-  const m = st.data.meta, back = needsBackup();
-  $('#bookSub').textContent = 'Your data lives on this PC. The workbook is your backup and the way to edit in Excel.';
-  let b = `<h2>Linked workbook</h2>`;
-  if (S.DEMO) b += `<p class="muted">Saving to a workbook is off in demo mode. You can still download a copy.</p>`;
-  else if (st.handle) b += `<p class="big">${esc(st.handle.name)}</p><p class="muted" style="margin:0">${m.lastWorkbookSave ? `Last saved ${relTime(m.lastWorkbookSave)}` : 'Not saved yet'}</p>`;
-  else b += `<p class="muted">No workbook linked yet. Choose a file once, for example in your OneDrive folder, and the app saves to it from then on.</p>`;
-  if (back) b += `<div class="callout">${m.lastWorkbookSave ? `Last saved to a workbook ${C.plural(C.diffDays(C.iso(new Date(m.lastWorkbookSave)), st.today), 'day')} ago.` : 'Not saved to a workbook yet.'} If browser data is cleared, anything not in a workbook is lost.</div>`;
-  b += `<div class="btnrow">`;
-  if (!S.DEMO && FSA) b += st.handle
-    ? `<button class="btn primary" data-act="wbsave">Save to workbook</button>`
-    : `<button class="btn primary" data-act="wblink">Choose where to save the workbook</button>`;
-  b += `<button class="btn ghost" data-act="wbload">Load from workbook</button>
-        <button class="btn ghost" data-act="wbcopy">Download a copy</button>`;
-  if (st.handle) b += `<button class="btn mute" data-act="wbunlink">Unlink</button>`;
-  b += `</div>`;
-  if (!FSA) b += `<p class="hint">This browser can't save to a file directly. Use Download a copy, or open the app in Edge or Chrome.</p>`;
-  if (S.hasSnapshot()) b += `<p class="hint"><button class="btn sm ghost" data-act="undoload">Undo the last load</button> Puts back the data you had before loading a workbook.</p>`;
+  const m = st.data.meta;
+  $('#bookSub').textContent = st.handle
+    ? 'Your projects live in this workbook. Every PC pointed at it sees the same data.'
+    : 'Keep your projects in a workbook in OneDrive so every PC with the app sees the same data.';
+  let b = '';
+  if (S.DEMO) {
+    b = `<h2>Workbook</h2><p class="muted">OneDrive sync is off in demo mode, so demo data never reaches your real workbook. You can still download a copy.</p>
+      <div class="btnrow"><button class="btn ghost" data-act="wbcopy">Download a copy</button></div>`;
+  } else if (!FSA) {
+    b = `<h2>Workbook</h2><p class="muted">This browser can't open files directly, so it can't keep a workbook in sync. Open the app in Edge or Chrome on a PC. Here you can still download a copy or load one.</p>
+      <div class="btnrow"><button class="btn ghost" data-act="wbcopy">Download a copy</button><button class="btn ghost" data-act="wbload">Load from workbook</button></div>`;
+  } else if (st.handle) {
+    const status = {
+      needperm: '<span class="hi">Not connected. Reconnect to load the latest.</span>',
+      locked: '<span class="hi">Open in Excel. Changes save once you close it.</span>',
+      error: '<span class="hi">Couldn\'t reach the file.</span>'
+    }[st.sync] || (m.dirty ? 'Saving...' : m.lastSync ? `<span class="ok">Synced ${relTime(new Date(m.lastSync).toISOString())}</span>` : 'Connecting...');
+    b = `<h2>Synced workbook</h2><p class="big">${esc(st.handle.name)}</p><p style="margin:0">${status}</p>
+      <div class="btnrow">
+        ${st.sync === 'needperm' ? '<button class="btn primary" data-act="reconnect">Reconnect workbook</button>' : '<button class="btn ghost" data-act="syncnow">Sync now</button>'}
+        <button class="btn ghost" data-act="wbcopy">Download a copy</button>
+        <button class="btn mute" data-act="wbopen">Switch workbook</button>
+        <button class="btn mute" data-act="wbunlink">Stop syncing</button>
+      </div>
+      <div class="section"><div class="sh"><h2>On your other devices</h2></div>
+        <p class="notes">PC: open the app, go to Workbook, choose <b>Open my workbook</b> and pick ${esc(st.handle.name)} in your OneDrive folder.
+Phone or tablet: open ${esc(st.handle.name)} in the Excel or OneDrive app and edit the Tasks sheet. Your PCs pick up the changes when the app opens.
+Close the file in Excel on a PC when you're done, or the app can't save to it.</p></div>`;
+  } else {
+    const has = st.data.tasks.length || st.data.projects.length;
+    b = `<h2>Not synced yet</h2>
+      <p class="muted">Your data is only on this PC. In the file picker, choose your OneDrive folder (often <b>OneDrive - Mindful Health Solutions</b>).</p>
+      ${has ? `<div class="callout">${C.plural(st.data.tasks.length, 'task')} live only in this browser. If its data is cleared, they're gone.</div>` : ''}
+      <div class="btnrow">
+        ${has ? '<button class="btn primary" data-act="wbnew">Create a workbook in OneDrive</button><button class="btn ghost" data-act="wbopen">Open my workbook</button>'
+              : '<button class="btn primary" data-act="wbopen">Open my workbook</button><button class="btn ghost" data-act="wbnew">Create a workbook in OneDrive</button>'}
+      </div>
+      <p class="hint">Open my workbook: you already made one on another PC. The app shows what's in it. Create: saves what's here to a new file.</p>`;
+  }
+  if (S.hasSnapshot()) b += `<p class="hint"><button class="btn sm ghost" data-act="undoload">Put back my earlier data</button> Restores what this PC had before you opened a workbook, and stops syncing.</p>`;
   $('#bookCard').innerHTML = b;
 
   $('#appCard').innerHTML = `<h2>App</h2>
-    ${opt('autoSave', 'Save to the workbook after each change', st.handle ? 'A few seconds after you stop editing. Fails quietly if the file is open in Excel; the rail shows when it last worked.' : 'Link a workbook first.', !st.handle)}
     ${opt('autoFullscreen', 'Go full screen when the app opens', 'Installed app only. Browsers need one click or key press first, so it switches on your first click.')}
     <div class="optrow"><span>Install as a desktop app<small>${STANDALONE ? 'Running as an installed app.' : st.installPrompt ? 'Adds it to the Start menu and opens in its own window.' : 'In Edge: the install icon in the address bar, or ... > Apps > Install this site as an app.'}</small></span>
       ${!STANDALONE && st.installPrompt ? '<button class="btn sm ghost" data-act="install">Install</button>' : ''}</div>`;
 
   const P = st.data.projects.length, T = st.data.tasks.length, open = st.data.tasks.filter(t => t.status !== 'Done').length;
-  $('#storeCard').innerHTML = `<h2>Stored on this PC</h2>
+  $('#storeCard').innerHTML = `<h2>${st.handle ? 'In the workbook' : 'Stored on this PC'}</h2>
     <dl class="facts"><dt>Projects</dt><dd>${P}</dd><dt>Tasks</dt><dd>${T} (${open} open)</dd>
-    <dt>Protection</dt><dd>${st.persisted === 'persistent' ? '<span class="ok">Kept unless you clear it</span>' : '<span class="hi">May be cleared</span>'}</dd></dl>
-    ${st.persisted === 'persistent' ? '' : '<div class="callout">The browser may clear this data if the disk gets full. Installing the app usually fixes this. Save to the workbook either way.</div>'}
-    <p class="hint">Clearing browser data for this site deletes everything here. The workbook is your copy.</p>`;
+    ${st.handle ? '' : `<dt>Protection</dt><dd>${st.persisted === 'persistent' ? '<span class="ok">Kept unless you clear it</span>' : '<span class="hi">May be cleared</span>'}</dd>`}</dl>
+    <p class="hint">${st.handle ? 'This PC also keeps a working copy, so the app opens instantly and works offline. Changes made offline save to the workbook when OneDrive is back.' : 'Clearing browser data for this site deletes everything here.'}</p>`;
 }
 function opt(key, label, help, disabled) {
   return `<div class="optrow"><span>${label}<small>${help}</small></span>
     <label class="switch"><input type="checkbox" data-opt="${key}" ${st.settings[key] && !disabled ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${esc(label)}"><span></span></label></div>`;
 }
 
-// ---------- workbook I/O ----------
+// ---------- OneDrive workbook sync ----------
+// The workbook is the shared copy. This PC keeps a working copy in localStorage.
+// meta.fileModified: the file's lastModified when we last read or wrote it.
+// meta.lastSync: when this PC last matched the file. meta.dirty: local edits not yet written.
+let syncing = false, syncAgain = false;
+function setSync(s) { st.sync = s; if (st.view === 'workbook') render(); else { renderConn(); $('#cBook').hidden = !needsBackup(); } }
+
 async function ensurePerm(h, ask) {
   const o = { mode: 'readwrite' };
   if ((await h.queryPermission(o)) === 'granted') return true;
@@ -407,28 +464,107 @@ async function makeBuffer() {
   if (!window.ExcelJS) throw new Error('ExcelJS not loaded');
   return buildWorkbook(st.data, st.today);
 }
-async function saveToWorkbook({ quiet } = {}) {
-  if (!st.handle) return;
+
+// File wins, except records edited here since the last sync. Never synced: everything here wins.
+function merge(file, local, lastSync) {
+  const pick = (fromFile, fromLocal) => {
+    const out = new Map(fromFile.map(r => [r.id, r]));
+    for (const r of fromLocal) if (!lastSync || (r.updated || 0) > lastSync) out.set(r.id, r);
+    return [...out.values()];
+  };
+  return S.normalise({ projects: pick(file.projects, local.projects), tasks: pick(file.tasks, local.tasks), meta: local.meta });
+}
+
+async function syncNow({ ask = false } = {}) {
+  if (!st.handle || S.DEMO) return;
+  if (syncing) { syncAgain = true; return; }
+  syncing = true;
+  let phase = 'read';
   try {
-    if (!(await ensurePerm(st.handle, !quiet))) { if (!quiet) toast('Saving needs permission to the file. Try again and choose Allow.'); return; }
-    const buf = await makeBuffer();
-    const w = await st.handle.createWritable();
-    await w.write(buf); await w.close();
-    st.data.meta.lastWorkbookSave = new Date().toISOString();
-    S.save(st.data); render();
-    if (!quiet) toast(`Saved to ${st.handle.name}`);
+    if (!(await ensurePerm(st.handle, ask))) { setSync('needperm'); return; }
+    const meta = st.data.meta;
+    const file = await st.handle.getFile();
+    let write = !!meta.dirty;
+    if (!file.size) write = true;
+    else if (file.lastModified !== meta.fileModified) {
+      const got = await readWorkbook(await file.arrayBuffer());
+      const before = st.data.tasks.length;
+      st.data = meta.dirty ? merge(got, st.data, meta.lastSync) : S.normalise({ ...got, meta });
+      st.data.meta = meta;
+      meta.fileModified = file.lastModified;
+      primeStamps();
+      if (!meta.dirty) { meta.lastSync = Date.now(); S.save(st.data); render(); }
+      else toast('Merged changes from another device with yours');
+      if (meta.lastSync && before !== st.data.tasks.length && !meta.dirty) console.info('loaded from workbook');
+    }
+    if (write) {
+      const buf = await makeBuffer();
+      phase = 'write';
+      const w = await st.handle.createWritable();
+      await w.write(buf);
+      await w.close();
+      meta.fileModified = (await st.handle.getFile()).lastModified;
+      meta.dirty = false;
+      meta.lastSync = Date.now();
+      meta.lastWorkbookSave = new Date().toISOString();
+    } else if (!meta.dirty) meta.lastSync = Date.now();
+    S.save(st.data);
+    setSync('ok');
+    render();
   } catch (e) {
-    console.error('workbook save failed', e);
-    toast(quiet ? 'Auto-save to the workbook failed. Is it open in Excel?' : "Couldn't save the workbook. If it's open in Excel, close it and try again. Your data is safe here.");
+    console.error('workbook sync failed', e);
+    // Reading worked but writing didn't: almost always Excel holding the file open.
+    setSync(phase === 'write' && e.name !== 'NotFoundError' ? 'locked' : 'error');
+  } finally {
+    syncing = false;
+    if (syncAgain) { syncAgain = false; syncNow(); }
   }
 }
-async function linkWorkbook() {
-  try {
-    const h = await window.showSaveFilePicker({ suggestedName: 'Projects.xlsx', types: [{ description: 'Excel workbook', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }] });
-    st.handle = h; await S.setHandle(h);
-    await saveToWorkbook();
-  } catch (e) { if (e.name !== 'AbortError') { console.error(e); toast("Couldn't link that file. Try another folder."); } }
+
+async function linkHandle(h, { fileWins }) {
+  if (!(await ensurePerm(h, true))) { toast('The app needs permission to edit that file. Try again and choose Allow.'); return; }
+  st.handle = h; await S.setHandle(h);
+  const m = st.data.meta;
+  m.fileModified = -1;
+  m.dirty = !fileWins;          // create: write what's here; open: read the file
+  m.lastSync = fileWins ? m.lastSync : 0;
+  st.sync = 'ok';
+  await syncNow();
 }
+
+async function createWorkbook() {
+  try {
+    const h = await window.showSaveFilePicker({ suggestedName: 'Projects.xlsx', startIn: 'documents', types: [XLSX_TYPE] });
+    await linkHandle(h, { fileWins: false });
+    if (st.sync === 'ok') toast(`Saved to ${h.name}. Changes save there from now on.`);
+  } catch (e) { if (e.name !== 'AbortError') { console.error(e); toast("Couldn't create the workbook there. Try another folder."); } }
+}
+
+async function openWorkbook() {
+  let h;
+  try { [h] = await window.showOpenFilePicker({ startIn: 'documents', types: [XLSX_TYPE] }); }
+  catch (e) { if (e.name !== 'AbortError') console.error(e); return; }
+  try {
+    const got = await readWorkbook(await (await h.getFile()).arrayBuffer());
+    const here = st.data.tasks.length;
+    if (here && !st.handle && !confirm(`Show what's in ${h.name}? It has ${C.plural(got.tasks.length, 'task')}. The ${C.plural(here, 'task')} on this PC are set aside; you can put them back from the Workbook screen.`)) return;
+    if (here && !st.handle) S.snapshot(st.data);
+    st.selTask = null; st.selProject = null;
+    await linkHandle(h, { fileWins: true });
+    if (st.sync === 'ok') toast(`Opened ${h.name}. ${C.plural(st.data.tasks.length, 'task')}.`);
+  } catch (e) {
+    console.error('workbook open failed', e);
+    toast("Couldn't read that workbook. It needs a Tasks sheet with a header row. Nothing was changed.");
+  }
+}
+
+async function unlink() {
+  st.handle = null; st.sync = 'ok';
+  Object.assign(st.data.meta, { dirty: false, fileModified: null, lastSync: 0 });
+  await S.setHandle(null); S.save(st.data); render();
+  toast('Stopped syncing. The workbook stays in OneDrive; this PC keeps its copy.');
+}
+
 async function downloadCopy() {
   try {
     const buf = await makeBuffer();
@@ -436,29 +572,19 @@ async function downloadCopy() {
     a.href = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     a.download = `Projects ${st.today}.xlsx`; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    if (!S.DEMO) { st.data.meta.lastWorkbookSave = new Date().toISOString(); S.save(st.data); render(); }
   } catch (e) { console.error(e); toast("Couldn't build the workbook. Reload the app and try again."); }
 }
+
+// Fallback for browsers without file access: one-off load that replaces local data.
 async function loadWorkbook() {
-  let file;
-  try {
-    if ('showOpenFilePicker' in window) {
-      const [h] = await window.showOpenFilePicker({ types: [{ description: 'Excel workbook', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }] });
-      file = await h.getFile();
-      if (!S.DEMO && !st.handle) { st.handle = h; await S.setHandle(h); }
-    } else {
-      file = await new Promise(res => { const i = $('#filePick'); i.value = ''; i.onchange = () => res(i.files[0]); i.click(); });
-    }
-  } catch (e) { if (e.name !== 'AbortError') console.error(e); return; }
+  const file = await new Promise(res => { const i = $('#filePick'); i.value = ''; i.onchange = () => res(i.files[0]); i.click(); });
   if (!file) return;
   try {
     const got = await readWorkbook(await file.arrayBuffer());
-    const msg = `Replace the data on this PC with ${file.name}? It has ${C.plural(got.projects.length, 'project')} and ${C.plural(got.tasks.length, 'task')}. You have ${st.data.projects.length} and ${st.data.tasks.length} now. You can undo this once.`;
-    if (!confirm(msg)) return;
+    if (!confirm(`Replace the data here with ${file.name}? It has ${C.plural(got.tasks.length, 'task')}. You can undo this once.`)) return;
     S.snapshot(st.data);
     st.data = S.normalise({ ...got, meta: st.data.meta });
-    st.selTask = null; st.selProject = null;
-    commit(`Loaded ${C.plural(got.tasks.length, 'task')} from ${file.name}`, () => { st.data = S.restoreSnapshot(); commit('Put back your earlier data'); });
+    commit(`Loaded ${C.plural(got.tasks.length, 'task')} from ${file.name}`);
   } catch (e) {
     console.error('workbook load failed', e);
     toast("Couldn't read that workbook. It needs a Tasks sheet with a header row. Nothing was changed.");
@@ -586,12 +712,14 @@ document.addEventListener('click', e => {
     }
     case 'delproj': removeProject(id); break;
     case 'addday': openTask(null, { due: el.dataset.day }); break;
-    case 'wbsave': saveToWorkbook(); break;
-    case 'wblink': linkWorkbook(); break;
+    case 'wbnew': createWorkbook(); break;
+    case 'wbopen': openWorkbook(); break;
     case 'wbload': loadWorkbook(); break;
     case 'wbcopy': downloadCopy(); break;
-    case 'wbunlink': st.handle = null; st.settings.autoSave = false; S.saveSettings(st.settings); S.setHandle(null); render(); toast('Workbook unlinked. The file is still where you saved it.'); break;
-    case 'undoload': { const d = S.restoreSnapshot(); if (d) { st.data = d; commit('Put back your earlier data'); } break; }
+    case 'wbunlink': unlink(); break;
+    case 'syncnow': syncNow({ ask: true }); break;
+    case 'reconnect': syncNow({ ask: true }); break;
+    case 'undoload': { const d = S.restoreSnapshot(); if (d) { st.handle = null; S.setHandle(null); st.data = d; Object.assign(st.data.meta, { dirty: false, fileModified: null, lastSync: 0 }); primeStamps(); S.save(st.data); render(); toast('Put back your earlier data. Syncing is off.'); } break; }
     case 'install': st.installPrompt?.prompt(); st.installPrompt?.userChoice.then(() => { st.installPrompt = null; render(); }); break;
   }
 });
@@ -609,7 +737,7 @@ document.addEventListener('submit', e => {
 
 document.addEventListener('change', e => {
   const k = e.target.dataset?.opt;
-  if (k) { st.settings[k] = e.target.checked; S.saveSettings(st.settings); render(); if (k === 'autoSave' && e.target.checked) saveToWorkbook(); }
+  if (k) { st.settings[k] = e.target.checked; S.saveSettings(st.settings); render(); }
   if (e.target.id === 'tlDone') { st.settings.showDone = e.target.checked; S.saveSettings(st.settings); render(); }
 });
 
@@ -665,7 +793,11 @@ if (STANDALONE) {
 // ---------- start ----------
 addEventListener('beforeinstallprompt', e => { e.preventDefault(); st.installPrompt = e; if (st.view === 'workbook') render(); });
 addEventListener('appinstalled', () => { st.installPrompt = null; toast('Installed. Open Projects from the Start menu.'); });
-addEventListener('storage', e => { if (e.key && e.key.startsWith('pp.data')) { st.data = S.load(); render(); } });
+addEventListener('storage', e => { if (e.key && e.key.startsWith('pp.data')) { st.data = S.load(); primeStamps(); render(); } });
+// Pick up changes from other devices when the window comes back, and retry pending saves.
+addEventListener('focus', () => syncNow());
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
+setInterval(() => { if (!document.hidden) syncNow(); }, 30000);
 
 setInterval(() => {
   const t = C.todayIso();
@@ -680,8 +812,10 @@ setInterval(() => {
   initTimelineDrag();
   render();
   if (q.get('new') === 'task') openTask(null);
+  primeStamps();
   st.persisted = await S.persist();
   st.handle = await S.getHandle();
+  if (st.handle) { st.sync = 'ok'; await syncNow(); }
   render();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(err => console.warn('service worker', err));
 })();

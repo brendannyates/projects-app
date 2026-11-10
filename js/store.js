@@ -25,12 +25,12 @@ export function normalise(d) {
   out.meta = { ...out.meta, ...(d.meta || {}) };
   out.projects = (d.projects || []).map(p => ({
     id: p.id || uid(), name: String(p.name || 'Untitled project'), status: p.status || 'Active',
-    start: p.start || '', due: p.due || '', notes: p.notes || ''
+    start: p.start || '', due: p.due || '', notes: p.notes || '', updated: p.updated || 0
   }));
   out.tasks = (d.tasks || []).map(t => ({
     id: t.id || uid(), projectId: t.projectId || '', title: String(t.title || 'Untitled task'),
     status: t.status || 'To do', priority: t.priority || 'Normal',
-    start: t.start || '', due: t.due || '', doneOn: t.doneOn || '', notes: t.notes || ''
+    start: t.start || '', due: t.due || '', doneOn: t.doneOn || '', notes: t.notes || '', updated: t.updated || 0
   }));
   return out;
 }
@@ -46,7 +46,7 @@ export function restoreSnapshot() {
 }
 
 export function loadSettings() {
-  const def = { autoFullscreen: true, autoSave: false, timelineZoom: 'week', showDone: false };
+  const def = { autoFullscreen: true, timelineZoom: 'week', showDone: false };
   try { return { ...def, ...JSON.parse(localStorage.getItem(SETTINGS) || '{}') }; } catch { return def; }
 }
 export function saveSettings(s) { localStorage.setItem(SETTINGS, JSON.stringify(s)); }
