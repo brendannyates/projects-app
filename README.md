@@ -9,6 +9,10 @@ Personal projects, to-dos and timeline as an installable desktop app (PWA), styl
 - Phone or tablet: open the workbook in the Excel or OneDrive app and edit the Tasks sheet. Mobile browsers can't run the sync.
 - Close the workbook in Excel on a PC when done; the app can't save while Excel has it open and shows "Waiting for Excel to close".
 - Each PC also keeps a working copy, so the app opens instantly and works offline.
+- Reminders: set "Remind me" on a task. The app shows a desktop notification at that time while it's open (minimized is fine). A closed web app can't notify.
+- Notes: add dated notes to any task or project from its detail panel.
+- Claude inbox: Workbook > Connect the inbox (save `Projects App Inbox.txt` next to the workbook). Claude in chat or voice appends one JSON change per line; the app applies them on its next sync and clears the file. Changes it can't apply show up as "Check inbox item" tasks.
+- Rail: re-sync (arrow loop) and light/dark toggle sit above Full screen.
 - Weeks run Sunday to Saturday.
 
 ## Views

@@ -1,6 +1,7 @@
 import * as C from './core.js';
 import * as S from './store.js';
 import { buildWorkbook, readWorkbook } from './workbook.js';
+import { applyOps, parseInbox, addNote, normRemind, stampText, dueReminders } from './ops.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -51,7 +52,7 @@ function commit(msg, undo) {
   S.save(st.data);
   render();
   if (msg) toast(msg, undo);
-  if (st.handle) { clearTimeout(syncTimer); syncTimer = setTimeout(() => syncNow(), 2000); }
+  if (st.handle) { clearTimeout(syncTimer); syncTimer = setTimeout(() => syncNow(), 300); }
 }
 function snapshotFor(fn) { const before = JSON.stringify(st.data); return () => { st.data = S.normalise(JSON.parse(before)); fn?.(); commit('Undone'); }; }
 
@@ -94,6 +95,8 @@ function renderConn() {
   } else if (st.data.meta.dirty) line = 'Saving to OneDrive...';
   else line = st.data.meta.lastSync ? `Synced ${relTime(new Date(st.data.meta.lastSync).toISOString())}` : 'Connecting...';
   dot.className = warn ? 'cdot warn' : 'cdot';
+  $('#syncBtn').classList.toggle('warn', !!st.handle && ['needperm', 'locked', 'error'].includes(st.sync));
+  $('#syncBtn').title = st.handle ? `Sync now. ${line}` : 'Sync: connect a workbook first';
   txt.textContent = line;
   ban.hidden = !banner; ban.innerHTML = banner;
 }
@@ -116,6 +119,7 @@ function taskRow(t, opts = {}) {
   if (opts.showProject !== false) bits.push(esc(pname(t.projectId)));
   if (t.priority === 'High') bits.push('<span class="hi">High priority</span>');
   if (t.start && t.start > st.today && t.status !== 'Done') bits.push(`Starts ${C.fmtShort(t.start)}`);
+  if (t.remind && !t.reminded && t.status !== 'Done') bits.push(`<span class="rem">Reminder ${esc(remindText(t.remind))}</span>`);
   const tick = t.status === 'Done' ? 'on' : t.status === 'Doing' ? 'doing' : '';
   const label = t.status === 'Done' ? `Reopen ${t.title}` : `Mark ${t.title} done`;
   return `<div class="trow${st.selTask === t.id ? ' sel' : ''}" data-state="${s}">
@@ -131,7 +135,8 @@ function renderToday() {
   $('#clockT').textContent = `${now.getHours()}:${C.pad(now.getMinutes())}`;
   $('#clockD').textContent = C.fmtLong(st.today);
   const g = C.todayGroups(st.data.tasks, st.today);
-  $('#todaySub').innerHTML = C.todaySubline(g).map(p => p.loud ? `<strong>${esc(p.text)}</strong>` : esc(p.text)).join(', ');
+  const rems = st.data.tasks.filter(t => t.remind && !t.reminded && t.status !== 'Done' && t.remind.startsWith(st.today)).length;
+  $('#todaySub').innerHTML = [...C.todaySubline(g), ...(rems ? [{ text: `${C.plural(rems, 'reminder')} today` }] : [])].map(p => p.loud ? `<strong>${esc(p.text)}</strong>` : esc(p.text)).join(', ');
 
   const doneToday = st.data.tasks.filter(t => t.status === 'Done' && t.doneOn === st.today);
   const groups = [
@@ -155,6 +160,15 @@ function renderToday() {
   document.querySelectorAll('#todayLists .trow').forEach(r => r.classList.toggle('sel', r.querySelector('.tmain').dataset.id === st.selTask));
 }
 
+function notesSection(kind, rec) {
+  return `<div class="section"><div class="sh"><h2>Notes</h2><span>${rec.notes ? '' : 'None yet'}</span></div>
+    ${rec.notes ? `<p class="notes">${esc(rec.notes)}</p>` : ''}
+    <form class="notebox" data-act="addnote" data-kind="${kind}" data-id="${rec.id}">
+      <input name="text" placeholder="Add a note" aria-label="Add a note" maxlength="1000" required>
+      <button class="btn sm ghost" type="submit">Add note</button></form></div>`;
+}
+const remindText = r => { if (!r) return ''; const [d, t] = r.split(' '); return `${d === st.today ? 'Today' : C.fmtDay(d)}, ${t.replace(/^0/, '')}`; };
+
 function taskDetail(t) {
   if (!t) return `<p class="muted" style="margin:0">Nothing selected. Pick a task to see it here.</p>`;
   const s = C.taskState(t, st.today), na = C.nextAction(t);
@@ -169,14 +183,16 @@ function taskDetail(t) {
       ${fact('Start', t.start ? C.fmtDay(t.start) : '<span class="muted">Not set</span>')}
       ${fact('Due', t.due ? C.fmtDay(t.due) : '<span class="muted">Not set</span>')}
       ${t.doneOn ? fact('Done', C.fmtDay(t.doneOn)) : ''}
+      ${t.remind ? fact('Reminder', `<span class="rem">${remindText(t.remind)}</span>${t.reminded ? ' <span class="muted">(sent)</span>' : ''}`) : ''}
     </dl>
     <button class="btn primary" data-act="advance" data-id="${t.id}" data-status="${na.status}">${na.label}</button>
     ${t.status !== 'Done' ? `<div class="actions">
       <button class="btn sm ghost" data-act="tomorrow" data-id="${t.id}">Move to tomorrow</button>
       <button class="btn sm ghost" data-act="week" data-id="${t.id}">Push 1 week</button>
+      ${t.remind ? `<button class="btn sm ghost" data-act="clearremind" data-id="${t.id}">Clear reminder</button>` : `<button class="btn sm ghost" data-act="edit" data-id="${t.id}">Set reminder</button>`}
       <button class="btn sm mute" data-act="delete" data-id="${t.id}">Delete</button></div>`
       : `<div class="actions"><button class="btn sm mute" data-act="delete" data-id="${t.id}">Delete</button></div>`}
-    ${t.notes ? `<div class="section"><div class="sh"><h2>Notes</h2></div><p class="notes">${esc(t.notes)}</p></div>` : ''}`;
+    ${notesSection('task', t)}`;
 }
 
 // ----- Week -----
@@ -266,7 +282,7 @@ function projectDetail(id) {
       ${p.status !== 'Done' ? `<button class="btn sm ghost" data-act="projdone" data-id="${p.id}">Mark project done</button>` : `<button class="btn sm ghost" data-act="projactive" data-id="${p.id}">Reopen project</button>`}
       ${p.status === 'Active' ? `<button class="btn sm mute" data-act="projhold" data-id="${p.id}">Put on hold</button>` : ''}
       <button class="btn sm mute" data-act="delproj" data-id="${p.id}">Delete</button></div>` : ''}
-    ${p?.notes ? `<div class="section"><div class="sh"><h2>Notes</h2></div><p class="notes">${esc(p.notes)}</p></div>` : ''}`;
+    ${p ? notesSection('project', p) : ''}`;
 }
 
 // ----- Timeline -----
@@ -414,6 +430,14 @@ function renderWorkbook() {
         <button class="btn mute" data-act="wbopen">Switch workbook</button>
         <button class="btn mute" data-act="wbunlink">Stop syncing</button>
       </div>
+      <div class="section"><div class="sh"><h2>Claude inbox</h2><span>${st.inbox ? 'Connected' : 'Not connected'}</span></div>
+        ${st.inbox
+          ? `<p class="notes">${esc(st.inbox.name)}. ${m.inboxLast ? `Last applied ${C.plural(m.inboxLast.n, 'change')} ${relTime(new Date(m.inboxLast.at).toISOString())}.` : 'Nothing from Claude yet.'}</p>
+             <div class="btnrow"><button class="btn sm mute" data-act="inboxunlink">Disconnect</button></div>`
+          : `<p class="notes">Lets Claude add and update tasks from chat or voice on any device, including your phone. Claude writes changes to a text file next to the workbook; the app applies them and clears it.</p>
+             <div class="btnrow"><button class="btn ghost" data-act="inboxlink">Connect the inbox</button></div>
+             <p class="hint">Save it in the same OneDrive folder as the workbook, named Projects App Inbox.txt.</p>`}
+      </div>
       <div class="section"><div class="sh"><h2>On your other devices</h2></div>
         <p class="notes">PC: open the app, go to Workbook, choose <b>Open my workbook</b> and pick ${esc(st.handle.name)} in your OneDrive folder.
 Phone or tablet: open ${esc(st.handle.name)} in the Excel or OneDrive app and edit the Tasks sheet. Your PCs pick up the changes when the app opens.
@@ -479,6 +503,7 @@ async function syncNow({ ask = false } = {}) {
   if (!st.handle || S.DEMO) return;
   if (syncing) { syncAgain = true; return; }
   syncing = true;
+  $('#syncBtn').classList.add('spin');
   let phase = 'read';
   try {
     if (!(await ensurePerm(st.handle, ask))) { setSync('needperm'); return; }
@@ -497,6 +522,7 @@ async function syncNow({ ask = false } = {}) {
       else toast('Merged changes from another device with yours');
       if (meta.lastSync && before !== st.data.tasks.length && !meta.dirty) console.info('loaded from workbook');
     }
+    if (await processInbox(ask)) write = true;
     if (write) {
       const buf = await makeBuffer();
       phase = 'write';
@@ -517,6 +543,7 @@ async function syncNow({ ask = false } = {}) {
     setSync(phase === 'write' && e.name !== 'NotFoundError' ? 'locked' : 'error');
   } finally {
     syncing = false;
+    $('#syncBtn').classList.remove('spin');
     if (syncAgain) { syncAgain = false; syncNow(); }
   }
 }
@@ -591,6 +618,95 @@ async function loadWorkbook() {
   }
 }
 
+// ---------- Claude inbox (voice and chat) ----------
+// Claude appends one JSON change per line to a text file next to the workbook; the app applies and clears it.
+const INBOX_HEADER = '# Projects App inbox. Claude adds one JSON change per line. The app applies them and clears this file.\n';
+function inboxProblem(why, raw) {
+  return { id: C.uid(), projectId: '', title: `Check inbox item: ${why}`.slice(0, 140), status: 'To do', priority: 'Normal',
+    start: '', due: st.today, doneOn: '', remind: '', reminded: '', notes: String(raw).slice(0, 2000), updated: Date.now() };
+}
+async function processInbox(ask = false) {
+  if (!st.inbox) return false;
+  try {
+    if (!(await ensurePerm(st.inbox, ask))) return false;
+    const text = await (await st.inbox.getFile()).text();
+    const { ops, bad } = parseInbox(text);
+    if (!ops.length && !bad.length) return false;
+    const meta = st.data.meta;
+    const seen = new Set(meta.appliedOps || []);
+    const fresh = ops.filter(o => !o.oid || !seen.has(o.oid));
+    const res = applyOps(st.data, fresh, st.today);
+    for (const f of res.failed) st.data.tasks.push(inboxProblem(f.why, JSON.stringify(f.op)));
+    for (const b of bad) st.data.tasks.push(inboxProblem('line is not valid JSON', b));
+    meta.appliedOps = [...seen, ...fresh.map(o => o.oid).filter(Boolean)].slice(-300);
+    // Clear what we applied. Keep anything Claude appended while we were working.
+    const again = await (await st.inbox.getFile()).text();
+    const rest = again.startsWith(text) ? again.slice(text.length) : again === text ? '' : null;
+    if (rest !== null) { const w = await st.inbox.createWritable(); await w.write(INBOX_HEADER + rest); await w.close(); }
+    meta.dirty = true;
+    meta.inboxLast = { at: Date.now(), n: res.applied.length, failed: res.failed.length + bad.length };
+    primeStamps();
+    S.save(st.data);
+    const fails = res.failed.length + bad.length;
+    toast(`Applied ${C.plural(res.applied.length, 'change')} from Claude${fails ? `. ${fails} couldn't be applied; see Today.` : ''}`);
+    return true;
+  } catch (e) { console.error('inbox failed', e); return false; }
+}
+async function linkInbox() {
+  try {
+    const h = await window.showSaveFilePicker({ suggestedName: 'Projects App Inbox.txt', startIn: st.handle || 'documents',
+      types: [{ description: 'Text file', accept: { 'text/plain': ['.txt'] } }] });
+    const f = await h.getFile();
+    if (!f.size) { const w = await h.createWritable(); await w.write(INBOX_HEADER); await w.close(); }
+    st.inbox = h; await S.setHandle(h, 'inbox');
+    toast(`Inbox connected: ${h.name}`);
+    await syncNow({ ask: true });
+    render();
+  } catch (e) { if (e.name !== 'AbortError') { console.error(e); toast("Couldn't use that file for the inbox. Try another name or folder."); } }
+}
+
+// ---------- reminders ----------
+function askNotify() { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); }
+function checkReminders() {
+  const due = dueReminders(st.data.tasks, stampText());
+  if (!due.length) return;
+  for (const t of due) {
+    t.reminded = 'Yes';
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try {
+        const n = new Notification(t.title, { body: `${pname(t.projectId)} · ${C.dueText(t, st.today)}`, tag: t.id, icon: 'icons/icon-192.png', requireInteraction: true });
+        n.onclick = () => { window.focus(); st.selTask = t.id; go('today'); n.close(); };
+      } catch (e) { console.warn('notification', e); }
+    }
+  }
+  commit(due.length === 1 ? `Reminder: ${due[0].title}` : `${due.length} reminders: ${due.map(t => t.title).join('; ')}`);
+}
+setInterval(checkReminders, 20000);
+
+// ---------- theme ----------
+const darkMQ = matchMedia('(prefers-color-scheme: dark)');
+function applyTheme() {
+  const th = st.settings.theme || 'system', root = document.documentElement;
+  if (th === 'system') root.removeAttribute('data-theme'); else root.dataset.theme = th;
+  const dark = th === 'dark' || (th === 'system' && darkMQ.matches);
+  root.toggleAttribute('data-dark', dark);
+  const b = $('#themeBtn');
+  b.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+  b.title = dark ? 'Light mode' : 'Dark mode';
+}
+darkMQ.addEventListener('change', applyTheme);
+$('#themeBtn').onclick = () => {
+  st.settings.theme = document.documentElement.hasAttribute('data-dark') ? 'light' : 'dark';
+  S.saveSettings(st.settings); applyTheme();
+};
+applyTheme();
+
+$('#syncBtn').onclick = async () => {
+  if (!st.handle) { go('workbook'); toast('Connect a workbook first, then this keeps it in sync.'); return; }
+  await syncNow({ ask: true });
+  if (st.sync === 'ok') toast(`Up to date with ${st.handle.name}`);
+};
+
 // ---------- dialogs ----------
 const dlg = $('#dlg'), form = $('#dlgForm');
 function field(label, html) { return `<div class="field"><label>${label}</label>${html}</div>`; }
@@ -606,7 +722,8 @@ function openTask(id, preset = {}) {
     <div class="field" id="newProjField" hidden><label>New project name</label><input name="newProject" maxlength="120"></div>
     <div class="row2">${field('Status', `<select name="status">${options(C.STATUSES, t.status)}</select>`)}${field('Priority', `<select name="priority">${options(C.PRIORITIES, t.priority)}</select>`)}</div>
     <div class="row2">${field('Start (optional)', `<input type="date" name="start" value="${t.start}">`)}${field('Due', `<input type="date" name="due" value="${t.due}">`)}</div>
-    ${field('Notes', `<textarea name="notes" maxlength="4000">${esc(t.notes)}</textarea>`)}
+    ${field('Remind me (optional)', `<input type="datetime-local" name="remind" value="${(t.remind || '').replace(' ', 'T')}">`)}
+    ${field('Notes', `<textarea name="notes" maxlength="8000">${esc(t.notes)}</textarea>`)}
     <div class="err" id="dlgErr"></div>
     <div class="mfoot">${id ? `<button class="btn sm danger" value="delete" type="submit" formnovalidate>Delete task</button>` : '<span></span>'}
       <span><button class="btn mute" value="cancel" formnovalidate>Cancel</button> <button class="btn primary" value="save">${id ? 'Save task' : 'Add task'}</button></span></div>`;
@@ -622,8 +739,10 @@ function openTask(id, preset = {}) {
     const undo = snapshotFor();
     let projectId = f.projectId;
     if (projectId === '__new') { const p = { id: C.uid(), name: f.newProject.trim(), status: 'Active', start: '', due: '', notes: '' }; st.data.projects.push(p); projectId = p.id; }
-    const target = id ? task(id) : { id: C.uid(), doneOn: '' };
+    const target = id ? task(id) : { id: C.uid(), doneOn: '', remind: '', reminded: '' };
     const wasDone = target.status === 'Done';
+    const rem = normRemind(f.remind);
+    if (rem !== (target.remind || '')) { target.remind = rem; target.reminded = ''; if (rem) askNotify(); }
     Object.assign(target, { title: f.title.trim(), projectId, priority: f.priority, start: f.start, due: f.due, notes: f.notes.trim() });
     if (target.status !== f.status || !id) C.setStatus(target, f.status, st.today);
     if (wasDone && f.status === 'Done') target.doneOn = target.doneOn || st.today;
@@ -720,17 +839,31 @@ document.addEventListener('click', e => {
     case 'syncnow': syncNow({ ask: true }); break;
     case 'reconnect': syncNow({ ask: true }); break;
     case 'undoload': { const d = S.restoreSnapshot(); if (d) { st.handle = null; S.setHandle(null); st.data = d; Object.assign(st.data.meta, { dirty: false, fileModified: null, lastSync: 0 }); primeStamps(); S.save(st.data); render(); toast('Put back your earlier data. Syncing is off.'); } break; }
+    case 'clearremind': { const undo = snapshotFor(); t.remind = ''; t.reminded = ''; commit('Reminder cleared', undo); break; }
+    case 'inboxlink': linkInbox(); break;
+    case 'inboxunlink': st.inbox = null; S.setHandle(null, 'inbox'); render(); toast('Inbox disconnected. The file stays in OneDrive.'); break;
     case 'install': st.installPrompt?.prompt(); st.installPrompt?.userChoice.then(() => { st.installPrompt = null; render(); }); break;
   }
 });
 
 document.addEventListener('submit', e => {
+  const n = e.target.closest('form[data-act="addnote"]');
+  if (n) {
+    e.preventDefault();
+    const text = n.text.value.trim(); if (!text) return;
+    const rec = n.dataset.kind === 'task' ? task(n.dataset.id) : proj(n.dataset.id);
+    if (!rec) return;
+    const undo = snapshotFor();
+    addNote(rec, text);
+    commit('Note added', undo);
+    return;
+  }
   const f = e.target.closest('form[data-act="quickadd"]');
   if (!f) return;
   e.preventDefault();
   const title = f.title.value.trim(); if (!title) return;
   const undo = snapshotFor();
-  st.data.tasks.push({ id: C.uid(), projectId: f.dataset.id, title, status: 'To do', priority: 'Normal', start: '', due: f.due.value, doneOn: '', notes: '' });
+  st.data.tasks.push({ id: C.uid(), projectId: f.dataset.id, title, status: 'To do', priority: 'Normal', start: '', due: f.due.value, doneOn: '', remind: '', reminded: '', notes: '' });
   commit(`Added ${title}`, undo);
   requestAnimationFrame(() => document.querySelector('form[data-act="quickadd"] input[name="title"]')?.focus());
 });
@@ -815,6 +948,8 @@ setInterval(() => {
   primeStamps();
   st.persisted = await S.persist();
   st.handle = await S.getHandle();
+  st.inbox = await S.getHandle('inbox');
+  checkReminders();
   if (st.handle) { st.sync = 'ok'; await syncNow(); }
   render();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(err => console.warn('service worker', err));

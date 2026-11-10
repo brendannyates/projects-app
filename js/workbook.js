@@ -1,5 +1,6 @@
 // Excel workbook export/import with ExcelJS (vendor/exceljs.min.js, loaded as a global).
 import { STATUSES, PRIORITIES, PROJECT_STATUSES, uid, weekStart, addDays, pad } from './core.js';
+import { normRemind } from './ops.js';
 
 const ROWS = 1000;          // rows prepared for validation and the timeline
 const WEEKS = 30;           // timeline width
@@ -35,6 +36,11 @@ function text(v) {
   }
   return String(v).trim();
 }
+function remindXl(v) {
+  if (v instanceof Date) return `${fromXl(v)} ${pad(v.getUTCHours())}:${pad(v.getUTCMinutes())}`;
+  if (typeof v === 'number') { const d = new Date(Date.UTC(1899, 11, 30) + Math.round(v * 1440) * 60000); return remindXl(d); }
+  return normRemind(text(v));
+}
 const pick = (v, list, def) => list.find(x => x.toLowerCase() === text(v).toLowerCase()) || def;
 
 function styleHeader(row) {
@@ -68,24 +74,26 @@ export async function buildWorkbook(data, today) {
   ts.columns = [
     { key: 'id', width: 13 }, { key: 'project', width: 28 }, { key: 'title', width: 42 },
     { key: 'status', width: 10 }, { key: 'priority', width: 10 }, { key: 'start', width: 12 },
-    { key: 'due', width: 12 }, { key: 'doneOn', width: 12 }, { key: 'notes', width: 50 }
+    { key: 'due', width: 12 }, { key: 'doneOn', width: 12 }, { key: 'remind', width: 16 }, { key: 'reminded', width: 10 },
+    { key: 'notes', width: 60 }
   ];
   const taskRows = tasks.map(t => [t.id, pName[t.projectId] || '', t.title, t.status, t.priority,
-    toXl(t.start), toXl(t.due), toXl(t.doneOn), t.notes]);
+    toXl(t.start), toXl(t.due), toXl(t.doneOn), t.remind || '', t.reminded ? 'Yes' : '', t.notes]);
   ts.addTable({
     name: 'tblTasks', ref: 'A1', headerRow: true,
     style: { theme: 'TableStyleLight1', showRowStripes: false },
-    columns: ['ID', 'Project', 'Task', 'Status', 'Priority', 'Start', 'Due', 'Done on', 'Notes'].map(name => ({ name, filterButton: true })),
-    rows: taskRows.length ? taskRows : [['', '', '', '', '', null, null, null, '']]
+    columns: ['ID', 'Project', 'Task', 'Status', 'Priority', 'Start', 'Due', 'Done on', 'Remind at', 'Reminded', 'Notes'].map(name => ({ name, filterButton: true })),
+    rows: taskRows.length ? taskRows : [['', '', '', '', '', null, null, null, '', '', '']]
   });
   styleHeader(ts.getRow(1));
   ['F', 'G', 'H'].forEach(col => { ts.getColumn(col).numFmt = 'mmm d, yyyy'; });
   ts.getColumn('A').font = { name: FONT, color: { argb: C.faint }, size: 9 };
+  ts.getColumn('K').alignment = { wrapText: true, vertical: 'top' };
   ts.dataValidations.add(`B2:B${ROWS}`, { type: 'list', allowBlank: true, formulae: [`Projects!$B$2:$B$${ROWS}`] });
   ts.dataValidations.add(`D2:D${ROWS}`, { type: 'list', allowBlank: true, formulae: [`"${STATUSES.join(',')}"`] });
   ts.dataValidations.add(`E2:E${ROWS}`, { type: 'list', allowBlank: true, formulae: [`"${PRIORITIES.join(',')}"`] });
   ts.addConditionalFormatting({
-    ref: `A2:I${ROWS}`,
+    ref: `A2:K${ROWS}`,
     rules: [
       { type: 'expression', priority: 1, formulae: ['$D2="Done"'], style: { font: { color: { argb: C.faint } } } },
       { type: 'expression', priority: 2, formulae: ['AND(ISNUMBER($G2),$G2<TODAY())'],
@@ -208,6 +216,7 @@ export async function buildWorkbook(data, today) {
     ['To bring edits back into the app: Workbook > Load from workbook. That replaces the app data with this file (you can undo once).', 10, false],
     ['Keep the ID column. It is how the app matches rows. New rows can leave ID blank.', 10, false],
     ['Tasks: one row per task. Project must match a name on the Projects sheet (the dropdown helps). Status: To do, Doing, Done.', 10, false],
+    ['Remind at: a date and time like 2026-11-12 09:00. The app shows a notification then, while it is open.', 10, false],
     ['Projects: Start and Due are optional. Open tasks, Done tasks and Progress are formulas.', 10, false],
     ['Timeline: follows the Tasks sheet row by row. Change the date in C1 to scroll. Weeks run Sunday to Saturday.', 10, false],
     ['', 10, false],
@@ -261,7 +270,8 @@ export async function readWorkbook(buffer) {
     const status = pick(get('status'), STATUSES, 'To do');
     tasks.push({ id: text(get('id')) || uid(), projectId: p ? p.id : '', title, status,
       priority: pick(get('priority'), PRIORITIES, 'Normal'), start: fromXl(get('start')), due: fromXl(get('due')),
-      doneOn: status === 'Done' ? fromXl(get('done on')) : '', notes: text(get('notes')) });
+      doneOn: status === 'Done' ? fromXl(get('done on')) : '', remind: remindXl(get('remind at')), reminded: /^y/i.test(text(get('reminded'))) ? 'Yes' : '',
+      notes: text(get('notes')) });
   }
   return { projects, tasks };
 }

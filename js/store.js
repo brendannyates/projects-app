@@ -30,7 +30,7 @@ export function normalise(d) {
   out.tasks = (d.tasks || []).map(t => ({
     id: t.id || uid(), projectId: t.projectId || '', title: String(t.title || 'Untitled task'),
     status: t.status || 'To do', priority: t.priority || 'Normal',
-    start: t.start || '', due: t.due || '', doneOn: t.doneOn || '', notes: t.notes || '', updated: t.updated || 0
+    start: t.start || '', due: t.due || '', doneOn: t.doneOn || '', remind: t.remind || '', reminded: t.reminded || '', notes: t.notes || '', updated: t.updated || 0
   }));
   return out;
 }
@@ -46,7 +46,7 @@ export function restoreSnapshot() {
 }
 
 export function loadSettings() {
-  const def = { autoFullscreen: true, timelineZoom: 'week', showDone: false };
+  const def = { theme: 'system', autoFullscreen: true, timelineZoom: 'week', showDone: false };
   try { return { ...def, ...JSON.parse(localStorage.getItem(SETTINGS) || '{}') }; } catch { return def; }
 }
 export function saveSettings(s) { localStorage.setItem(SETTINGS, JSON.stringify(s)); }
@@ -67,22 +67,22 @@ function idb() {
     r.onerror = () => rej(r.error);
   });
 }
-export async function getHandle() {
+export async function getHandle(name = 'workbook') {
   if (DEMO) return null;
   try {
     const db = await idb();
     return await new Promise(res => {
-      const q = db.transaction('h').objectStore('h').get('workbook');
+      const q = db.transaction('h').objectStore('h').get(name);
       q.onsuccess = () => res(q.result || null); q.onerror = () => res(null);
     });
   } catch { return null; }
 }
-export async function setHandle(h) {
+export async function setHandle(h, name = 'workbook') {
   if (DEMO) return;
   const db = await idb();
   await new Promise((res, rej) => {
     const tx = db.transaction('h', 'readwrite');
-    h ? tx.objectStore('h').put(h, 'workbook') : tx.objectStore('h').delete('workbook');
+    h ? tx.objectStore('h').put(h, name) : tx.objectStore('h').delete(name);
     tx.oncomplete = res; tx.onerror = () => rej(tx.error);
   });
 }
