@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projects</title>
+<meta name="theme-color" content="#1E6B59">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="app">
+  <nav class="rail" aria-label="Main">
+    <div class="brand">Projects</div>
+    <button class="item" data-view="today">Today <span class="count" id="cToday" hidden></span></button>
+    <button class="item" data-view="week">This week</button>
+    <button class="item" data-view="projects">Projects</button>
+    <button class="item" data-view="timeline">Timeline</button>
+    <div class="gap"></div>
+    <button class="item" data-view="workbook">Workbook <span class="count warn" id="cBook" hidden>!</span></button>
+    <div class="spacer"></div>
+    <button class="item newbtn" id="railNew">New task <kbd>N</kbd></button>
+    <button class="item" id="fsBtn">Full screen</button>
+    <div class="conn"><span class="cdot" id="connDot"></span><span id="connText">Saved on this PC</span></div>
+  </nav>
+
+  <main class="page" id="page">
+    <div class="demo" id="demoBanner" hidden>Demo data. Everything here is invented and kept apart from your real data.</div>
+
+    <!-- Today -->
+    <section class="view" id="v-today">
+      <header class="top">
+        <div><h1>Today</h1><p class="sub" id="todaySub"></p></div>
+        <div class="clock"><div class="t" id="clockT"></div><div class="d" id="clockD"></div></div>
+      </header>
+      <div class="cols">
+        <div id="todayLists"></div>
+        <aside class="card detail" id="todayDetail"></aside>
+      </div>
+    </section>
+
+    <!-- Week -->
+    <section class="view" id="v-week" hidden>
+      <header class="top">
+        <div><h1>This week</h1><p class="sub" id="weekSub"></p></div>
+        <div class="seg" role="group" aria-label="Week">
+          <button id="wkPrev" aria-label="Previous week">Previous</button>
+          <button id="wkNow">This week</button>
+          <button id="wkNext" aria-label="Next week">Next</button>
+        </div>
+      </header>
+      <div id="weekLate"></div>
+      <div class="week" id="weekGrid"></div>
+      <p class="hint">Drag a task to another day to change its due date.</p>
+    </section>
+
+    <!-- Projects -->
+    <section class="view" id="v-projects" hidden>
+      <header class="top">
+        <div><h1>Projects</h1><p class="sub" id="projSub"></p></div>
+        <button class="btn ghost" id="newProject">New project</button>
+      </header>
+      <div class="viewbar">
+        <span class="lbl">Show</span>
+        <div class="seg" role="group" aria-label="Show projects" id="projFilter">
+          <button data-f="active" aria-pressed="true">Active</button>
+          <button data-f="hold" aria-pressed="false">On hold</button>
+          <button data-f="done" aria-pressed="false">Done</button>
+          <button data-f="all" aria-pressed="false">All</button>
+        </div>
+      </div>
+      <div class="cols">
+        <div class="card board" id="projList"></div>
+        <aside class="card detail" id="projDetail"></aside>
+      </div>
+    </section>
+
+    <!-- Timeline -->
+    <section class="view" id="v-timeline" hidden>
+      <header class="top">
+        <div><h1>Timeline</h1><p class="sub" id="tlSub"></p></div>
+      </header>
+      <div class="viewbar">
+        <span class="lbl">Zoom</span>
+        <div class="seg" role="group" aria-label="Zoom" id="tlZoom">
+          <button data-z="day">Days</button>
+          <button data-z="week">Weeks</button>
+          <button data-z="quarter">Quarter</button>
+        </div>
+        <button class="btn sm ghost" id="tlToday">Jump to today</button>
+        <label class="check"><input type="checkbox" id="tlDone"> Show done</label>
+      </div>
+      <div class="card tlwrap" id="tlWrap"><div id="tl"></div></div>
+      <ul class="key">
+        <li><span class="sw bar"></span>Planned</li>
+        <li><span class="sw bar track"></span>In progress</li>
+        <li><span class="sw bar soon"></span>Due today</li>
+        <li><span class="sw bar late"></span>Overdue</li>
+        <li><span class="sw bar done"></span>Done</li>
+        <li><span class="sw diamond"></span>Due date only</li>
+        <li><span class="sw span"></span>Project span</li>
+      </ul>
+      <p class="hint">Drag a bar to move it. Drag its right edge to change the due date. Click to edit.</p>
+    </section>
+
+    <!-- Workbook -->
+    <section class="view" id="v-workbook" hidden>
+      <header class="top"><div><h1>Workbook</h1><p class="sub" id="bookSub"></p></div></header>
+      <div class="cols">
+        <div>
+          <div class="card pad" id="bookCard"></div>
+          <div class="card pad" style="margin-top:24px" id="appCard"></div>
+        </div>
+        <aside class="card pad" id="storeCard"></aside>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Edit dialog -->
+<dialog class="modal" id="dlg">
+  <form method="dialog" id="dlgForm" autocomplete="off"></form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<input type="file" id="filePick" accept=".xlsx" hidden>
+
+<script src="vendor/exceljs.min.js" defer></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,687 @@
+import * as C from './core.js';
+import * as S from './store.js';
+import { buildWorkbook, readWorkbook } from './workbook.js';
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const st = {
+  data: S.load(),
+  settings: S.loadSettings(),
+  today: C.todayIso(),
+  view: 'today',
+  selTask: null,
+  selProject: null,
+  weekOf: C.weekStart(C.todayIso()),
+  projFilter: 'active',
+  handle: null,
+  persisted: 'unknown',
+  installPrompt: null
+};
+const FSA = 'showSaveFilePicker' in window;
+const STANDALONE = matchMedia('(display-mode: standalone), (display-mode: window-controls-overlay), (display-mode: fullscreen)').matches;
+const PX = { day: 32, week: 12, quarter: 4 };
+
+const proj = id => st.data.projects.find(p => p.id === id);
+const task = id => st.data.tasks.find(t => t.id === id);
+const pname = id => (id && proj(id)?.name) || 'No project';
+
+// ---------- saving ----------
+let autoTimer = null;
+function commit(msg, undo) {
+  S.save(st.data);
+  render();
+  if (msg) toast(msg, undo);
+  if (st.settings.autoSave && st.handle) {
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(() => saveToWorkbook({ quiet: true }), 4000);
+  }
+}
+function snapshotFor(fn) { const before = JSON.stringify(st.data); return () => { st.data = S.normalise(JSON.parse(before)); fn?.(); commit('Undone'); }; }
+
+let toastTimer;
+function toast(msg, undo) {
+  const el = $('#toast');
+  el.innerHTML = esc(msg) + (undo ? ' <button type="button">Undo</button>' : '');
+  if (undo) el.querySelector('button').onclick = () => { el.classList.remove('show'); undo(); };
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), undo ? 6000 : 2800);
+}
+
+// ---------- rendering ----------
+function render() {
+  document.querySelectorAll('.rail .item[data-view]').forEach(b => { if (b.dataset.view === st.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  document.querySelectorAll('.view').forEach(v => { v.hidden = v.id !== 'v-' + st.view; });
+  const g = C.todayGroups(st.data.tasks, st.today);
+  const c = $('#cToday'); c.hidden = !g.late.length; c.textContent = g.late.length;
+  $('#cBook').hidden = !needsBackup();
+  ({ today: renderToday, week: renderWeek, projects: renderProjects, timeline: renderTimeline, workbook: renderWorkbook })[st.view]();
+  renderConn();
+}
+
+function renderConn() {
+  const dot = $('#connDot'), txt = $('#connText');
+  if (S.DEMO) { dot.className = 'cdot warn'; txt.textContent = 'Demo data'; return; }
+  if (st.handle && st.data.meta.lastWorkbookSave) {
+    dot.className = needsBackup() ? 'cdot warn' : 'cdot';
+    txt.textContent = `Workbook saved ${relTime(st.data.meta.lastWorkbookSave)}`;
+  } else { dot.className = 'cdot'; txt.textContent = 'Saved on this PC'; }
+}
+function relTime(isoTs) {
+  const d = new Date(isoTs), day = C.iso(d);
+  const t = `${d.getHours()}:${C.pad(d.getMinutes())}`;
+  if (day === st.today) return `at ${t}`;
+  if (day === C.addDays(st.today, -1)) return `yesterday ${t}`;
+  return `${C.fmtShort(day)}`;
+}
+function needsBackup() {
+  if (S.DEMO || !st.data.tasks.length) return false;
+  const last = st.data.meta.lastWorkbookSave;
+  return !last || C.diffDays(C.iso(new Date(last)), st.today) >= 7;
+}
+
+function taskRow(t, opts = {}) {
+  const s = C.taskState(t, st.today);
+  const bits = [];
+  if (opts.showProject !== false) bits.push(esc(pname(t.projectId)));
+  if (t.priority === 'High') bits.push('<span class="hi">High priority</span>');
+  if (t.start && t.start > st.today && t.status !== 'Done') bits.push(`Starts ${C.fmtShort(t.start)}`);
+  const tick = t.status === 'Done' ? 'on' : t.status === 'Doing' ? 'doing' : '';
+  const label = t.status === 'Done' ? `Reopen ${t.title}` : `Mark ${t.title} done`;
+  return `<div class="trow${st.selTask === t.id ? ' sel' : ''}" data-state="${s}">
+    <button class="tick ${tick}" data-act="toggle" data-id="${t.id}" aria-label="${esc(label)}">✓</button>
+    <button class="tmain" data-act="select" data-id="${t.id}"><b>${esc(t.title)}</b><small>${bits.join(' · ') || '&nbsp;'}</small></button>
+    <span class="st">${esc(C.dueText(t, st.today))}</span>
+  </div>`;
+}
+
+// ----- Today -----
+function renderToday() {
+  const now = new Date();
+  $('#clockT').textContent = `${now.getHours()}:${C.pad(now.getMinutes())}`;
+  $('#clockD').textContent = C.fmtLong(st.today);
+  const g = C.todayGroups(st.data.tasks, st.today);
+  $('#todaySub').innerHTML = C.todaySubline(g).map(p => p.loud ? `<strong>${esc(p.text)}</strong>` : esc(p.text)).join(', ');
+
+  const doneToday = st.data.tasks.filter(t => t.status === 'Done' && t.doneOn === st.today);
+  const groups = [
+    ['Overdue', g.late], ['Due today', g.soon, 'Nothing due today.'], ['In progress', g.doing],
+    ['Next 7 days', g.next], ['Later or no date', g.later, null, 6], ['Done today', doneToday]
+  ];
+  let html = '';
+  if (!st.data.tasks.length) html = `<div class="card group"><p class="empty">No tasks yet. Choose New task or press N to add your first one.</p></div>`;
+  else for (const [title, list, emptyMsg, cap] of groups) {
+    if (!list.length && !emptyMsg) continue;
+    const shown = cap && !st.showAllLater ? list.slice(0, cap) : list;
+    html += `<div class="card group"><div class="gh"><h2>${title}</h2><span>${list.length || ''}</span></div>
+      ${list.length ? shown.map(t => taskRow(t)).join('') : `<p class="empty">${emptyMsg}</p>`}
+      ${cap && list.length > cap && !st.showAllLater ? `<button class="btn sm ghost" data-act="more">Show all ${list.length}</button>` : ''}</div>`;
+  }
+  $('#todayLists').innerHTML = html;
+
+  if (!st.selTask || !task(st.selTask)) st.selTask = (g.late[0] || g.soon[0] || g.doing[0] || g.next[0] || g.later[0] || {}).id || null;
+  $('#todayDetail').innerHTML = taskDetail(st.selTask && task(st.selTask));
+  // re-mark selection after choosing default
+  document.querySelectorAll('#todayLists .trow').forEach(r => r.classList.toggle('sel', r.querySelector('.tmain').dataset.id === st.selTask));
+}
+
+function taskDetail(t) {
+  if (!t) return `<p class="muted" style="margin:0">Nothing selected. Pick a task to see it here.</p>`;
+  const s = C.taskState(t, st.today), na = C.nextAction(t);
+  const fact = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+  return `<div class="dh"><div><div class="name">${esc(t.title)}</div>
+      <div class="meta">${t.projectId ? `<button class="btn sm ghost" style="padding:0;min-height:0" data-act="openproj" data-id="${t.projectId}">${esc(pname(t.projectId))}</button>` : 'No project'}</div></div>
+      <button class="btn sm mute" data-act="edit" data-id="${t.id}">Edit</button></div>
+    <p class="lead" data-state="${s}">${esc(C.taskLead(t, st.today))}</p>
+    <dl class="facts">
+      ${fact('Status', esc(t.status))}
+      ${fact('Priority', t.priority === 'High' ? '<span class="hi">High</span>' : esc(t.priority))}
+      ${fact('Start', t.start ? C.fmtDay(t.start) : '<span class="muted">Not set</span>')}
+      ${fact('Due', t.due ? C.fmtDay(t.due) : '<span class="muted">Not set</span>')}
+      ${t.doneOn ? fact('Done', C.fmtDay(t.doneOn)) : ''}
+    </dl>
+    <button class="btn primary" data-act="advance" data-id="${t.id}" data-status="${na.status}">${na.label}</button>
+    ${t.status !== 'Done' ? `<div class="actions">
+      <button class="btn sm ghost" data-act="tomorrow" data-id="${t.id}">Move to tomorrow</button>
+      <button class="btn sm ghost" data-act="week" data-id="${t.id}">Push 1 week</button>
+      <button class="btn sm mute" data-act="delete" data-id="${t.id}">Delete</button></div>`
+      : `<div class="actions"><button class="btn sm mute" data-act="delete" data-id="${t.id}">Delete</button></div>`}
+    ${t.notes ? `<div class="section"><div class="sh"><h2>Notes</h2></div><p class="notes">${esc(t.notes)}</p></div>` : ''}`;
+}
+
+// ----- Week -----
+function renderWeek() {
+  const days = C.weekDays(st.weekOf), end = days[6];
+  const inWeek = st.data.tasks.filter(t => t.due >= st.weekOf && t.due <= end);
+  const done = inWeek.filter(t => t.status === 'Done').length;
+  const label = st.weekOf === C.weekStart(st.today) ? 'This week' : `Week of ${C.fmtShort(st.weekOf)}`;
+  $('#v-week h1').textContent = label;
+  $('#weekSub').textContent = `${C.fmtShort(st.weekOf)} to ${C.fmtShort(end)}. ${C.plural(inWeek.length, 'task')} due, ${done} done.`;
+
+  const late = st.data.tasks.filter(t => t.status !== 'Done' && t.due && t.due < st.weekOf && t.due < st.today);
+  $('#weekLate').innerHTML = late.length && st.weekOf <= st.today && end >= st.today
+    ? `<div class="latestrip"><b>Overdue from earlier weeks</b>${C.sortTasks(late, st.today).map(chip).join('')}</div>` : '';
+
+  $('#weekGrid').innerHTML = days.map(d => {
+    const list = C.sortTasks(st.data.tasks.filter(t => t.due === d), st.today);
+    const cls = d === st.today ? 'today' : d < st.today ? 'past' : '';
+    return `<div class="day ${cls}" data-day="${d}">
+      <div class="dhd"><b>${C.dow(d)}</b><span>${C.fmtShort(d)}</span></div>
+      ${list.map(chip).join('')}
+      <button class="daddbtn" data-act="addday" data-day="${d}">+ Add</button></div>`;
+  }).join('');
+}
+function chip(t) {
+  const s = C.taskState(t, st.today);
+  return `<button class="chip" draggable="true" data-state="${s}" data-act="edit" data-id="${t.id}">${esc(t.title)}<small>${esc(pname(t.projectId))}${t.priority === 'High' ? ' · High' : ''}${s === 'late' ? ' · ' + esc(C.dueText(t, st.today)) : ''}</small></button>`;
+}
+
+// ----- Projects -----
+function projectList() {
+  const f = st.projFilter;
+  return st.data.projects.filter(p => f === 'all' || (f === 'active' && p.status === 'Active') || (f === 'hold' && p.status === 'On hold') || (f === 'done' && p.status === 'Done'));
+}
+function renderProjects() {
+  const all = st.data.projects, active = all.filter(p => p.status === 'Active');
+  const stats = active.map(p => C.projectStats(p, st.data.tasks, st.today));
+  const late = stats.filter(s => s.state === 'late').length;
+  $('#projSub').innerHTML = `${active.length} active${late ? `, <strong>${late} with overdue work</strong>` : ''}, ${all.length - active.length} on hold or done`;
+  document.querySelectorAll('#projFilter button').forEach(b => b.setAttribute('aria-pressed', b.dataset.f === st.projFilter));
+
+  const rank = { late: 0, soon: 1, track: 2, open: 3, done: 4 };
+  const list = projectList().map(p => ({ p, s: C.projectStats(p, st.data.tasks, st.today) }))
+    .sort((a, b) => rank[a.s.state] - rank[b.s.state] || (a.p.due || '9999').localeCompare(b.p.due || '9999'));
+  const loose = st.data.tasks.filter(t => !t.projectId);
+  let html = list.map(({ p, s }) => projRow(p.id, p.name, s, C.projectStatusText(p, s, st.today), p)).join('');
+  if (loose.length && (st.projFilter === 'active' || st.projFilter === 'all')) {
+    const s = C.projectStats({ id: '', status: 'Active' }, st.data.tasks, st.today);
+    html += projRow('', 'No project', s, s.late ? `${s.late} overdue` : `${s.open} open`, null);
+  }
+  $('#projList').innerHTML = html || `<p class="empty">No projects here. Choose New project to start one.</p>`;
+
+  if (st.selProject === null || (st.selProject && !proj(st.selProject))) st.selProject = list[0]?.p.id ?? (loose.length ? '' : null);
+  document.querySelectorAll('.prow').forEach(r => r.setAttribute('aria-pressed', r.dataset.id === st.selProject));
+  $('#projDetail').innerHTML = projectDetail(st.selProject);
+}
+function projRow(id, name, s, status, p) {
+  const sub = [p?.status === 'On hold' ? 'On hold' : '', p?.start || p?.due ? [p.start && C.fmtShort(p.start), p.due && C.fmtShort(p.due)].filter(Boolean).join(' to ') : ''].filter(Boolean).join(' · ');
+  const pct = s.total ? Math.round(s.done / s.total * 100) : 0;
+  return `<button class="prow" data-state="${s.state}" data-act="selproj" data-id="${id}" aria-label="${esc(name)}, ${esc(status)}">
+    <span><b>${esc(name)}</b><small>${sub || C.plural(s.total, 'task')}</small></span>
+    <span class="prog"><span class="bar"><i style="width:${pct}%"></i></span>${s.done} of ${s.total} done</span>
+    <span class="st">${esc(status)}</span></button>`;
+}
+function projectDetail(id) {
+  if (id === null) return `<p class="muted" style="margin:0">Pick a project to see its tasks.</p>`;
+  const p = id ? proj(id) : null;
+  const s = C.projectStats(p || { id: '', status: 'Active' }, st.data.tasks, st.today);
+  const tasks = C.sortTasks(st.data.tasks.filter(t => t.projectId === id), st.today);
+  const open = tasks.filter(t => t.status !== 'Done'), done = tasks.filter(t => t.status === 'Done');
+  const mini = t => { const ts = C.taskState(t, st.today); return `<div class="mini" data-state="${ts}"><button data-act="edit" data-id="${t.id}">${esc(t.title)}</button><span class="st">${esc(C.dueText(t, st.today))}</span></div>`; };
+  const lead = p ? C.projectStatusText(p, s, st.today) : `${s.open} open`;
+  return `<div class="dh"><div><div class="name">${esc(p ? p.name : 'No project')}</div>
+      <div class="meta">${p ? `${esc(p.status)}${p.start ? ' · Starts ' + C.fmtShort(p.start) : ''}${p.due ? ' · Due ' + C.fmtShort(p.due) : ''}` : 'Tasks not filed under a project'}</div></div>
+      ${p ? `<button class="btn sm mute" data-act="editproj" data-id="${p.id}">Edit</button>` : ''}</div>
+    <p class="lead" data-state="${s.state}">${esc(lead)}</p>
+    <div class="prog" style="margin:10px 0 4px"><span class="bar"><i style="width:${s.total ? s.done / s.total * 100 : 0}%"></i></span>${s.done} of ${s.total} done</div>
+    <form class="quick" data-act="quickadd" data-id="${id}">
+      <input name="title" placeholder="Add a task" aria-label="New task title" required>
+      <input name="due" type="date" aria-label="Due date" style="flex:0 0 138px">
+      <button class="btn sm ghost" type="submit">Add</button>
+    </form>
+    <div class="section"><div class="sh"><h2>Open</h2><span>${open.length}</span></div>
+      ${open.length ? open.map(mini).join('') : '<p class="muted" style="margin:0;font-size:14px">Nothing open.</p>'}</div>
+    ${done.length ? `<div class="section"><div class="sh"><h2>Done</h2><span>${done.length}</span></div>${done.map(mini).join('')}</div>` : ''}
+    ${p ? `<div class="actions" style="margin-top:16px">
+      ${p.status !== 'Done' ? `<button class="btn sm ghost" data-act="projdone" data-id="${p.id}">Mark project done</button>` : `<button class="btn sm ghost" data-act="projactive" data-id="${p.id}">Reopen project</button>`}
+      ${p.status === 'Active' ? `<button class="btn sm mute" data-act="projhold" data-id="${p.id}">Put on hold</button>` : ''}
+      <button class="btn sm mute" data-act="delproj" data-id="${p.id}">Delete</button></div>` : ''}
+    ${p?.notes ? `<div class="section"><div class="sh"><h2>Notes</h2></div><p class="notes">${esc(p.notes)}</p></div>` : ''}`;
+}
+
+// ----- Timeline -----
+let tlRange = null;
+function renderTimeline() {
+  const z = st.settings.timelineZoom, px = PX[z];
+  document.querySelectorAll('#tlZoom button').forEach(b => b.setAttribute('aria-pressed', b.dataset.z === z));
+  $('#tlDone').checked = st.settings.showDone;
+  const showDone = st.settings.showDone;
+
+  const projects = st.data.projects.filter(p => showDone || p.status !== 'Done');
+  const groups = projects.map(p => ({ p, s: C.projectStats(p, st.data.tasks, st.today) }));
+  groups.push({ p: null, s: null });
+  const visible = t => (showDone || t.status !== 'Done') && (t.start || t.due);
+  const undated = st.data.tasks.filter(t => t.status !== 'Done' && !t.start && !t.due).length;
+
+  const dates = [st.today, ...st.data.tasks.filter(visible).flatMap(t => [t.start, t.due]), ...projects.flatMap(p => [p.start, p.due])].filter(Boolean).sort();
+  const from = C.weekStart(C.addDays(dates[0] < C.addDays(st.today, -14) ? dates[0] : st.today, -14));
+  const lastD = dates[dates.length - 1];
+  const to = C.addDays(C.weekStart(lastD > C.addDays(st.today, 56) ? lastD : C.addDays(st.today, 56)), 13);
+  const days = C.diffDays(from, to) + 1, width = days * px;
+  tlRange = { from, px };
+  const x = d => C.diffDays(from, d) * px;
+
+  const grid = `background-image:repeating-linear-gradient(90deg,var(--surface-2) 0 1px,transparent 1px ${px * 7}px);`;
+  // header: months and weeks
+  let head = '';
+  for (let d = from; d <= to; d = C.addDays(d, 1)) {
+    if (d.endsWith('-01') || d === from) head += `<span class="mlab" style="left:${x(d)}px">${C.monthName(d)} ${d.slice(0, 4)}</span>`;
+  }
+  const wStep = z === 'quarter' ? 4 : 1;
+  let wi = 0;
+  for (let d = from; d <= to; d = C.addDays(d, 7), wi++) {
+    const now = st.today >= d && st.today <= C.addDays(d, 6);
+    if (wi % wStep === 0 || now) head += `<span class="wlab${now ? ' now' : ''}" style="left:${x(d)}px">${z === 'day' ? C.fmtShort(d) : d.slice(8).replace(/^0/, '')}</span>`;
+  }
+  if (z === 'day') for (let d = from; d <= to; d = C.addDays(d, 1)) if (C.parse(d).getDay()) head += `<span class="wlab" style="left:${x(d)}px;color:var(--faint)">${d.slice(8).replace(/^0/, '')}</span>`;
+
+  let rows = `<div class="tlrow tlhead"><div class="tllabel">Project and task</div><div class="track" style="width:${width}px">${head}</div></div>`;
+  let any = false;
+  for (const { p, s } of groups) {
+    const tasks = st.data.tasks.filter(t => t.projectId === (p ? p.id : '') && visible(t))
+      .sort((a, b) => (a.start || a.due).localeCompare(b.start || b.due));
+    if (!p && !tasks.length) continue;
+    any = true;
+    const status = p ? C.projectStatusText(p, s, st.today) : '';
+    let span = '';
+    if (p && s.start && s.end) {
+      const b = C.barSpan(s.start, s.end);
+      span = `<span class="pspan" data-state="${s.state}" style="left:${x(b.s)}px;width:${(C.diffDays(b.s, b.e) + 1) * px}px"></span>`;
+    }
+    if (p?.due) span += `<span class="pdue" title="Project due ${C.fmtShort(p.due)}" style="left:${x(p.due) + px / 2 - 7}px"></span>`;
+    rows += `<div class="tlrow proj" data-state="${p ? s.state : 'open'}"><div class="tllabel"><button data-act="${p ? 'openproj' : 'openloose'}" data-id="${p ? p.id : ''}">${esc(p ? p.name : 'No project')}</button><span class="lst">${esc(status)}</span></div>
+      <div class="track" style="width:${width}px;${grid}">${span}</div></div>`;
+    for (const t of tasks) {
+      const b = C.barSpan(t.start, t.due), ts = C.taskState(t, st.today);
+      const single = !t.start || !t.due;
+      const left = x(b.s), w = (C.diffDays(b.s, b.e) + 1) * px;
+      const bar = single
+        ? `<span class="tbar diamond" data-state="${ts}" data-id="${t.id}" style="left:${left + px / 2 - 8}px" title="${esc(t.title)}: ${esc(C.dueText(t, st.today))}"></span>`
+        : `<span class="tbar" data-state="${ts}" data-id="${t.id}" style="left:${left}px;width:${w}px" title="${esc(t.title)}: ${C.fmtShort(b.s)} to ${C.fmtShort(b.e)}"><span class="grip"></span></span>`;
+      const tagLeft = single ? left + px / 2 + 14 : left + w + 8;
+      rows += `<div class="tlrow" data-state="${ts}"><div class="tllabel"><button data-act="edit" data-id="${t.id}">${esc(t.title)}</button><span class="lst">${esc(C.dueText(t, st.today))}</span></div>
+        <div class="track" style="width:${width}px;${grid}">${bar}<span class="btag" style="left:${tagLeft}px">${ts === 'late' ? esc(C.dueText(t, st.today)) : t.due ? C.fmtShort(t.due) : ''}</span></div></div>`;
+    }
+  }
+  if (!any) rows += `<p class="empty">Nothing on the timeline yet. Give a task a start or due date and it shows up here.</p>`;
+  const wrap = $('#tlWrap'), keep = wrap.scrollLeft, first = !wrap.dataset.ready;
+  $('#tl').style.width = 280 + width + 'px';
+  $('#tl').innerHTML = rows + `<div class="nowline" style="left:${280 + x(st.today) + px / 2}px" title="Today"></div>`;
+  const placed = st.data.tasks.filter(visible).length;
+  $('#tlSub').textContent = `${C.plural(placed, 'task')} placed${undated ? `, ${undated} without dates not shown` : ''}. Weeks run Sunday to Saturday.`;
+  if (first || wrap.dataset.zoom !== z) { wrap.dataset.ready = 1; wrap.dataset.zoom = z; jumpToday(); }
+  else wrap.scrollLeft = keep;
+}
+function jumpToday() {
+  if (!tlRange) return;
+  const wrap = $('#tlWrap');
+  wrap.scrollLeft = Math.max(0, C.diffDays(tlRange.from, st.today) * tlRange.px - (wrap.clientWidth - 280) / 3);
+}
+
+// Drag bars: move, or resize from the right edge. A click without movement opens the editor.
+function initTimelineDrag() {
+  let drag = null;
+  $('#tl').addEventListener('pointerdown', e => {
+    const bar = e.target.closest('.tbar');
+    if (!bar || e.button !== 0) return;
+    const t = task(bar.dataset.id);
+    drag = { bar, t, x0: e.clientX, mode: e.target.classList.contains('grip') ? 'resize' : 'move',
+      left: parseFloat(bar.style.left), width: bar.offsetWidth, delta: 0 };
+    bar.setPointerCapture(e.pointerId);
+    bar.classList.add('dragging');
+    e.preventDefault();
+  });
+  $('#tl').addEventListener('pointermove', e => {
+    if (!drag) return;
+    const px = tlRange.px;
+    drag.delta = Math.round((e.clientX - drag.x0) / px);
+    if (drag.mode === 'move') drag.bar.style.left = drag.left + drag.delta * px + 'px';
+    else drag.bar.style.width = Math.max(px, drag.width + drag.delta * px) + 'px';
+  });
+  const end = () => {
+    if (!drag) return;
+    const { t, delta, mode, bar } = drag; drag = null;
+    bar.classList.remove('dragging');
+    if (!delta) { openTask(t.id); return; }
+    const undo = snapshotFor();
+    if (mode === 'move') {
+      if (t.start) t.start = C.addDays(t.start, delta);
+      if (t.due) t.due = C.addDays(t.due, delta);
+    } else {
+      const nd = C.addDays(t.due, delta);
+      t.due = nd < t.start ? t.start : nd;
+    }
+    commit(`${t.title}: ${t.start ? C.fmtShort(t.start) + ' to ' : 'due '}${C.fmtShort(t.due || t.start)}`, undo);
+  };
+  $('#tl').addEventListener('pointerup', end);
+  $('#tl').addEventListener('pointercancel', end);
+}
+
+// ----- Workbook -----
+function renderWorkbook() {
+  const m = st.data.meta, back = needsBackup();
+  $('#bookSub').textContent = 'Your data lives on this PC. The workbook is your backup and the way to edit in Excel.';
+  let b = `<h2>Linked workbook</h2>`;
+  if (S.DEMO) b += `<p class="muted">Saving to a workbook is off in demo mode. You can still download a copy.</p>`;
+  else if (st.handle) b += `<p class="big">${esc(st.handle.name)}</p><p class="muted" style="margin:0">${m.lastWorkbookSave ? `Last saved ${relTime(m.lastWorkbookSave)}` : 'Not saved yet'}</p>`;
+  else b += `<p class="muted">No workbook linked yet. Choose a file once, for example in your OneDrive folder, and the app saves to it from then on.</p>`;
+  if (back) b += `<div class="callout">${m.lastWorkbookSave ? `Last saved to a workbook ${C.plural(C.diffDays(C.iso(new Date(m.lastWorkbookSave)), st.today), 'day')} ago.` : 'Not saved to a workbook yet.'} If browser data is cleared, anything not in a workbook is lost.</div>`;
+  b += `<div class="btnrow">`;
+  if (!S.DEMO && FSA) b += st.handle
+    ? `<button class="btn primary" data-act="wbsave">Save to workbook</button>`
+    : `<button class="btn primary" data-act="wblink">Choose where to save the workbook</button>`;
+  b += `<button class="btn ghost" data-act="wbload">Load from workbook</button>
+        <button class="btn ghost" data-act="wbcopy">Download a copy</button>`;
+  if (st.handle) b += `<button class="btn mute" data-act="wbunlink">Unlink</button>`;
+  b += `</div>`;
+  if (!FSA) b += `<p class="hint">This browser can't save to a file directly. Use Download a copy, or open the app in Edge or Chrome.</p>`;
+  if (S.hasSnapshot()) b += `<p class="hint"><button class="btn sm ghost" data-act="undoload">Undo the last load</button> Puts back the data you had before loading a workbook.</p>`;
+  $('#bookCard').innerHTML = b;
+
+  $('#appCard').innerHTML = `<h2>App</h2>
+    ${opt('autoSave', 'Save to the workbook after each change', st.handle ? 'A few seconds after you stop editing. Fails quietly if the file is open in Excel; the rail shows when it last worked.' : 'Link a workbook first.', !st.handle)}
+    ${opt('autoFullscreen', 'Go full screen when the app opens', 'Installed app only. Browsers need one click or key press first, so it switches on your first click.')}
+    <div class="optrow"><span>Install as a desktop app<small>${STANDALONE ? 'Running as an installed app.' : st.installPrompt ? 'Adds it to the Start menu and opens in its own window.' : 'In Edge: the install icon in the address bar, or ... > Apps > Install this site as an app.'}</small></span>
+      ${!STANDALONE && st.installPrompt ? '<button class="btn sm ghost" data-act="install">Install</button>' : ''}</div>`;
+
+  const P = st.data.projects.length, T = st.data.tasks.length, open = st.data.tasks.filter(t => t.status !== 'Done').length;
+  $('#storeCard').innerHTML = `<h2>Stored on this PC</h2>
+    <dl class="facts"><dt>Projects</dt><dd>${P}</dd><dt>Tasks</dt><dd>${T} (${open} open)</dd>
+    <dt>Protection</dt><dd>${st.persisted === 'persistent' ? '<span class="ok">Kept unless you clear it</span>' : '<span class="hi">May be cleared</span>'}</dd></dl>
+    ${st.persisted === 'persistent' ? '' : '<div class="callout">The browser may clear this data if the disk gets full. Installing the app usually fixes this. Save to the workbook either way.</div>'}
+    <p class="hint">Clearing browser data for this site deletes everything here. The workbook is your copy.</p>`;
+}
+function opt(key, label, help, disabled) {
+  return `<div class="optrow"><span>${label}<small>${help}</small></span>
+    <label class="switch"><input type="checkbox" data-opt="${key}" ${st.settings[key] && !disabled ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${esc(label)}"><span></span></label></div>`;
+}
+
+// ---------- workbook I/O ----------
+async function ensurePerm(h, ask) {
+  const o = { mode: 'readwrite' };
+  if ((await h.queryPermission(o)) === 'granted') return true;
+  return ask && (await h.requestPermission(o)) === 'granted';
+}
+async function makeBuffer() {
+  if (!window.ExcelJS) throw new Error('ExcelJS not loaded');
+  return buildWorkbook(st.data, st.today);
+}
+async function saveToWorkbook({ quiet } = {}) {
+  if (!st.handle) return;
+  try {
+    if (!(await ensurePerm(st.handle, !quiet))) { if (!quiet) toast('Saving needs permission to the file. Try again and choose Allow.'); return; }
+    const buf = await makeBuffer();
+    const w = await st.handle.createWritable();
+    await w.write(buf); await w.close();
+    st.data.meta.lastWorkbookSave = new Date().toISOString();
+    S.save(st.data); render();
+    if (!quiet) toast(`Saved to ${st.handle.name}`);
+  } catch (e) {
+    console.error('workbook save failed', e);
+    toast(quiet ? 'Auto-save to the workbook failed. Is it open in Excel?' : "Couldn't save the workbook. If it's open in Excel, close it and try again. Your data is safe here.");
+  }
+}
+async function linkWorkbook() {
+  try {
+    const h = await window.showSaveFilePicker({ suggestedName: 'Projects.xlsx', types: [{ description: 'Excel workbook', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }] });
+    st.handle = h; await S.setHandle(h);
+    await saveToWorkbook();
+  } catch (e) { if (e.name !== 'AbortError') { console.error(e); toast("Couldn't link that file. Try another folder."); } }
+}
+async function downloadCopy() {
+  try {
+    const buf = await makeBuffer();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    a.download = `Projects ${st.today}.xlsx`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    if (!S.DEMO) { st.data.meta.lastWorkbookSave = new Date().toISOString(); S.save(st.data); render(); }
+  } catch (e) { console.error(e); toast("Couldn't build the workbook. Reload the app and try again."); }
+}
+async function loadWorkbook() {
+  let file;
+  try {
+    if ('showOpenFilePicker' in window) {
+      const [h] = await window.showOpenFilePicker({ types: [{ description: 'Excel workbook', accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] } }] });
+      file = await h.getFile();
+      if (!S.DEMO && !st.handle) { st.handle = h; await S.setHandle(h); }
+    } else {
+      file = await new Promise(res => { const i = $('#filePick'); i.value = ''; i.onchange = () => res(i.files[0]); i.click(); });
+    }
+  } catch (e) { if (e.name !== 'AbortError') console.error(e); return; }
+  if (!file) return;
+  try {
+    const got = await readWorkbook(await file.arrayBuffer());
+    const msg = `Replace the data on this PC with ${file.name}? It has ${C.plural(got.projects.length, 'project')} and ${C.plural(got.tasks.length, 'task')}. You have ${st.data.projects.length} and ${st.data.tasks.length} now. You can undo this once.`;
+    if (!confirm(msg)) return;
+    S.snapshot(st.data);
+    st.data = S.normalise({ ...got, meta: st.data.meta });
+    st.selTask = null; st.selProject = null;
+    commit(`Loaded ${C.plural(got.tasks.length, 'task')} from ${file.name}`, () => { st.data = S.restoreSnapshot(); commit('Put back your earlier data'); });
+  } catch (e) {
+    console.error('workbook load failed', e);
+    toast("Couldn't read that workbook. It needs a Tasks sheet with a header row. Nothing was changed.");
+  }
+}
+
+// ---------- dialogs ----------
+const dlg = $('#dlg'), form = $('#dlgForm');
+function field(label, html) { return `<div class="field"><label>${label}</label>${html}</div>`; }
+function options(list, val) { return list.map(o => `<option${o === val ? ' selected' : ''}>${esc(o)}</option>`).join(''); }
+
+function openTask(id, preset = {}) {
+  const t = id ? task(id) : { title: '', projectId: preset.projectId ?? (st.view === 'projects' && st.selProject ? st.selProject : ''), status: 'To do', priority: 'Normal', start: '', due: preset.due ?? st.today, notes: '' };
+  const projOpts = `<option value="">No project</option>` + st.data.projects.filter(p => p.status !== 'Done' || p.id === t.projectId)
+    .map(p => `<option value="${p.id}"${p.id === t.projectId ? ' selected' : ''}>${esc(p.name)}</option>`).join('') + `<option value="__new">New project...</option>`;
+  form.innerHTML = `<div class="mh"><h2>${id ? 'Edit task' : 'New task'}</h2><button class="x" value="cancel" aria-label="Close">×</button></div>
+    ${field('Task', `<input name="title" required maxlength="200" value="${esc(t.title)}">`)}
+    ${field('Project', `<select name="projectId">${projOpts}</select>`)}
+    <div class="field" id="newProjField" hidden><label>New project name</label><input name="newProject" maxlength="120"></div>
+    <div class="row2">${field('Status', `<select name="status">${options(C.STATUSES, t.status)}</select>`)}${field('Priority', `<select name="priority">${options(C.PRIORITIES, t.priority)}</select>`)}</div>
+    <div class="row2">${field('Start (optional)', `<input type="date" name="start" value="${t.start}">`)}${field('Due', `<input type="date" name="due" value="${t.due}">`)}</div>
+    ${field('Notes', `<textarea name="notes" maxlength="4000">${esc(t.notes)}</textarea>`)}
+    <div class="err" id="dlgErr"></div>
+    <div class="mfoot">${id ? `<button class="btn sm danger" value="delete" type="submit" formnovalidate>Delete task</button>` : '<span></span>'}
+      <span><button class="btn mute" value="cancel" formnovalidate>Cancel</button> <button class="btn primary" value="save">${id ? 'Save task' : 'Add task'}</button></span></div>`;
+  const sel = form.projectId;
+  sel.onchange = () => { $('#newProjField').hidden = sel.value !== '__new'; if (sel.value === '__new') form.newProject.focus(); };
+  form.onsubmit = e => {
+    const action = e.submitter?.value;
+    if (action === 'cancel') return;
+    if (action === 'delete') { removeTask(id); return; }
+    const f = Object.fromEntries(new FormData(form));
+    if (f.start && f.due && f.start > f.due) { e.preventDefault(); $('#dlgErr').textContent = 'Start is after the due date. Change one of them.'; return; }
+    if (f.projectId === '__new' && !f.newProject.trim()) { e.preventDefault(); $('#dlgErr').textContent = 'Name the new project, or pick an existing one.'; return; }
+    const undo = snapshotFor();
+    let projectId = f.projectId;
+    if (projectId === '__new') { const p = { id: C.uid(), name: f.newProject.trim(), status: 'Active', start: '', due: '', notes: '' }; st.data.projects.push(p); projectId = p.id; }
+    const target = id ? task(id) : { id: C.uid(), doneOn: '' };
+    const wasDone = target.status === 'Done';
+    Object.assign(target, { title: f.title.trim(), projectId, priority: f.priority, start: f.start, due: f.due, notes: f.notes.trim() });
+    if (target.status !== f.status || !id) C.setStatus(target, f.status, st.today);
+    if (wasDone && f.status === 'Done') target.doneOn = target.doneOn || st.today;
+    if (!id) { st.data.tasks.push(target); st.selTask = target.id; }
+    commit(id ? 'Task saved' : `Added ${target.title}`, undo);
+  };
+  dlg.showModal();
+  form.title.focus();
+}
+
+function openProject(id) {
+  const p = id ? proj(id) : { name: '', status: 'Active', start: '', due: '', notes: '' };
+  form.innerHTML = `<div class="mh"><h2>${id ? 'Edit project' : 'New project'}</h2><button class="x" value="cancel" aria-label="Close">×</button></div>
+    ${field('Project', `<input name="name" required maxlength="120" value="${esc(p.name)}">`)}
+    ${field('Status', `<select name="status">${options(C.PROJECT_STATUSES, p.status)}</select>`)}
+    <div class="row2">${field('Start (optional)', `<input type="date" name="start" value="${p.start}">`)}${field('Due (optional)', `<input type="date" name="due" value="${p.due}">`)}</div>
+    ${field('Notes', `<textarea name="notes" maxlength="4000">${esc(p.notes)}</textarea>`)}
+    <div class="err" id="dlgErr"></div>
+    <div class="mfoot">${id ? `<button class="btn sm danger" value="delete" formnovalidate>Delete project</button>` : '<span></span>'}
+      <span><button class="btn mute" value="cancel" formnovalidate>Cancel</button> <button class="btn primary" value="save">${id ? 'Save project' : 'Add project'}</button></span></div>`;
+  form.onsubmit = e => {
+    const action = e.submitter?.value;
+    if (action === 'cancel') return;
+    if (action === 'delete') { removeProject(id); return; }
+    const f = Object.fromEntries(new FormData(form));
+    if (f.start && f.due && f.start > f.due) { e.preventDefault(); $('#dlgErr').textContent = 'Start is after the due date. Change one of them.'; return; }
+    const undo = snapshotFor();
+    const target = id ? p : { id: C.uid() };
+    Object.assign(target, { name: f.name.trim(), status: f.status, start: f.start, due: f.due, notes: f.notes.trim() });
+    if (!id) { st.data.projects.push(target); st.selProject = target.id; if (st.projFilter !== 'all' && target.status !== 'Active') st.projFilter = 'all'; }
+    commit(id ? 'Project saved' : `Added ${target.name}`, undo);
+  };
+  dlg.showModal();
+  form.name.focus();
+}
+
+function removeTask(id) {
+  const t = task(id); if (!t) return;
+  const undo = snapshotFor();
+  st.data.tasks = st.data.tasks.filter(x => x.id !== id);
+  if (st.selTask === id) st.selTask = null;
+  commit(`Deleted ${t.title}`, undo);
+}
+function removeProject(id) {
+  const p = proj(id); if (!p) return;
+  const n = st.data.tasks.filter(t => t.projectId === id).length;
+  if (n && !confirm(`Delete ${p.name}? Its ${C.plural(n, 'task')} move to No project.`)) return;
+  const undo = snapshotFor();
+  st.data.tasks.forEach(t => { if (t.projectId === id) t.projectId = ''; });
+  st.data.projects = st.data.projects.filter(x => x.id !== id);
+  st.selProject = null;
+  commit(`Deleted ${p.name}`, undo);
+}
+
+// ---------- events ----------
+function go(view) { st.view = view; render(); $('#page').scrollTop = 0; }
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-act],[data-view],[data-f],[data-z]');
+  if (!el) return;
+  if (el.dataset.view && el.classList.contains('item')) return go(el.dataset.view);
+  if (el.dataset.f) { st.projFilter = el.dataset.f; st.selProject = null; return render(); }
+  if (el.dataset.z) { st.settings.timelineZoom = el.dataset.z; S.saveSettings(st.settings); return render(); }
+  const id = el.dataset.id, t = id ? task(id) : null;
+  switch (el.dataset.act) {
+    case 'select': st.selTask = id; render(); break;
+    case 'toggle': {
+      const undo = snapshotFor();
+      C.setStatus(t, t.status === 'Done' ? 'To do' : 'Done', st.today);
+      commit(t.status === 'Done' ? `Done: ${t.title}` : `Reopened ${t.title}`, undo); break;
+    }
+    case 'advance': { const undo = snapshotFor(); C.setStatus(t, el.dataset.status, st.today); commit(t.status === 'Done' ? `Done: ${t.title}` : t.status === 'Doing' ? `Started ${t.title}` : `Reopened ${t.title}`, undo); break; }
+    case 'tomorrow': { const undo = snapshotFor(); const nd = C.addDays(st.today, 1); if (t.start && t.start > nd) t.start = ''; t.due = nd; commit(`${t.title} moved to tomorrow`, undo); break; }
+    case 'week': { const undo = snapshotFor(); const base = t.due && t.due > st.today ? t.due : st.today; if (t.start) t.start = C.addDays(t.start, C.diffDays(base, C.addDays(base, 7))); t.due = C.addDays(base, 7); commit(`${t.title} due ${C.fmtDay(t.due)}`, undo); break; }
+    case 'delete': removeTask(id); break;
+    case 'edit': openTask(id); break;
+    case 'more': st.showAllLater = true; render(); break;
+    case 'openproj': st.selProject = id; st.projFilter = proj(id)?.status === 'Active' ? 'active' : 'all'; go('projects'); break;
+    case 'openloose': st.selProject = ''; st.projFilter = 'active'; go('projects'); break;
+    case 'selproj': st.selProject = id; render(); break;
+    case 'editproj': openProject(id); break;
+    case 'projdone': case 'projactive': case 'projhold': {
+      const p = proj(id), undo = snapshotFor();
+      p.status = { projdone: 'Done', projactive: 'Active', projhold: 'On hold' }[el.dataset.act];
+      commit(`${p.name}: ${p.status.toLowerCase()}`, undo); break;
+    }
+    case 'delproj': removeProject(id); break;
+    case 'addday': openTask(null, { due: el.dataset.day }); break;
+    case 'wbsave': saveToWorkbook(); break;
+    case 'wblink': linkWorkbook(); break;
+    case 'wbload': loadWorkbook(); break;
+    case 'wbcopy': downloadCopy(); break;
+    case 'wbunlink': st.handle = null; st.settings.autoSave = false; S.saveSettings(st.settings); S.setHandle(null); render(); toast('Workbook unlinked. The file is still where you saved it.'); break;
+    case 'undoload': { const d = S.restoreSnapshot(); if (d) { st.data = d; commit('Put back your earlier data'); } break; }
+    case 'install': st.installPrompt?.prompt(); st.installPrompt?.userChoice.then(() => { st.installPrompt = null; render(); }); break;
+  }
+});
+
+document.addEventListener('submit', e => {
+  const f = e.target.closest('form[data-act="quickadd"]');
+  if (!f) return;
+  e.preventDefault();
+  const title = f.title.value.trim(); if (!title) return;
+  const undo = snapshotFor();
+  st.data.tasks.push({ id: C.uid(), projectId: f.dataset.id, title, status: 'To do', priority: 'Normal', start: '', due: f.due.value, doneOn: '', notes: '' });
+  commit(`Added ${title}`, undo);
+  requestAnimationFrame(() => document.querySelector('form[data-act="quickadd"] input[name="title"]')?.focus());
+});
+
+document.addEventListener('change', e => {
+  const k = e.target.dataset?.opt;
+  if (k) { st.settings[k] = e.target.checked; S.saveSettings(st.settings); render(); if (k === 'autoSave' && e.target.checked) saveToWorkbook(); }
+  if (e.target.id === 'tlDone') { st.settings.showDone = e.target.checked; S.saveSettings(st.settings); render(); }
+});
+
+// Week drag and drop
+document.addEventListener('dragstart', e => { const c = e.target.closest?.('.chip'); if (!c) return; e.dataTransfer.setData('text/plain', c.dataset.id); c.classList.add('dragging'); });
+document.addEventListener('dragend', e => e.target.classList?.remove('dragging'));
+document.addEventListener('dragover', e => { const d = e.target.closest?.('.day'); if (d) { e.preventDefault(); d.classList.add('over'); } });
+document.addEventListener('dragleave', e => { const d = e.target.closest?.('.day'); if (d && !d.contains(e.relatedTarget)) d.classList.remove('over'); });
+document.addEventListener('drop', e => {
+  const d = e.target.closest?.('.day'); if (!d) return;
+  e.preventDefault();
+  const t = task(e.dataTransfer.getData('text/plain')); if (!t || t.due === d.dataset.day) return render();
+  const undo = snapshotFor(), nd = d.dataset.day;
+  if (t.start && t.due) t.start = C.addDays(t.start, C.diffDays(t.due, nd));
+  else if (t.start && t.start > nd) t.start = '';
+  t.due = nd;
+  commit(`${t.title} due ${C.fmtDay(nd)}`, undo);
+});
+
+$('#wkPrev').onclick = () => { st.weekOf = C.addDays(st.weekOf, -7); render(); };
+$('#wkNext').onclick = () => { st.weekOf = C.addDays(st.weekOf, 7); render(); };
+$('#wkNow').onclick = () => { st.weekOf = C.weekStart(st.today); render(); };
+$('#newProject').onclick = () => openProject(null);
+$('#railNew').onclick = () => openTask(null);
+$('#tlToday').onclick = jumpToday;
+
+document.addEventListener('keydown', e => {
+  if (dlg.open || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
+  const k = e.key.toLowerCase();
+  if (k === 'n') { e.preventDefault(); openTask(null); }
+  else if (k === 't') go('today'); else if (k === 'w') go('week'); else if (k === 'p') go('projects'); else if (k === 'l') go('timeline');
+});
+
+// ---------- full screen ----------
+const fsBtn = $('#fsBtn');
+const fsLabel = () => { fsBtn.textContent = document.fullscreenElement ? 'Exit full screen' : 'Full screen'; };
+fsBtn.onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => toast('Full screen is blocked here. Press F11 instead.'));
+document.addEventListener('fullscreenchange', fsLabel);
+if (!document.documentElement.requestFullscreen) fsBtn.hidden = true;
+if (STANDALONE) {
+  try { window.moveTo(0, 0); window.resizeTo(screen.availWidth, screen.availHeight); } catch {}
+  if (st.settings.autoFullscreen) {
+    // Browsers only allow full screen after a user gesture, so take the first one.
+    const once = () => {
+      removeEventListener('pointerdown', once, true); removeEventListener('keydown', once, true);
+      if (st.settings.autoFullscreen && !document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+    };
+    addEventListener('pointerdown', once, true); addEventListener('keydown', once, true);
+  }
+}
+
+// ---------- start ----------
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); st.installPrompt = e; if (st.view === 'workbook') render(); });
+addEventListener('appinstalled', () => { st.installPrompt = null; toast('Installed. Open Projects from the Start menu.'); });
+addEventListener('storage', e => { if (e.key && e.key.startsWith('pp.data')) { st.data = S.load(); render(); } });
+
+setInterval(() => {
+  const t = C.todayIso();
+  if (t !== st.today) { st.today = t; render(); }
+  else if (st.view === 'today' && !dlg.open) { const n = new Date(); $('#clockT').textContent = `${n.getHours()}:${C.pad(n.getMinutes())}`; }
+}, 30000);
+
+(async function init() {
+  if (S.DEMO) { $('#demoBanner').hidden = false; document.title = 'Projects (demo)'; }
+  const q = new URLSearchParams(location.search);
+  if (['today', 'week', 'projects', 'timeline', 'workbook'].includes(q.get('view'))) st.view = q.get('view');
+  initTimelineDrag();
+  render();
+  if (q.get('new') === 'task') openTask(null);
+  st.persisted = await S.persist();
+  st.handle = await S.getHandle();
+  render();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(err => console.warn('service worker', err));
+})();
