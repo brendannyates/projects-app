@@ -5,7 +5,7 @@ Personal projects, to-dos and timeline as an installable desktop app (PWA), styl
 - **Your data lives in a workbook in your OneDrive folder.** Every PC with the app pointed at the same file sees the same projects. Nothing goes to GitHub or anywhere else.
 - First PC: Workbook > Create a workbook in OneDrive. Other PCs: Workbook > Open my workbook, pick the same file.
 - The app saves about 2 sec after each change, and checks for changes from other devices when it opens, when you switch back to it, and every 30 sec.
-- Edits made on two devices before either syncs are merged by record (the newer edit wins for a record changed on both).
+- Edits made on two devices before either syncs are merged by record. If the same task was changed on both, the PC that syncs second keeps its version.
 - Phone or tablet: open the workbook in the Excel or OneDrive app and edit the Tasks sheet. Mobile browsers can't run the sync.
 - Close the workbook in Excel on a PC when done; the app can't save while Excel has it open and shows "Waiting for Excel to close".
 - Each PC also keeps a working copy, so the app opens instantly and works offline.
