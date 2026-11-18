@@ -65,7 +65,7 @@ header{padding:37px 24px}main{padding:24px 16px 55px}input{width:100%;min-width:
 <body>
 <div id="library">
 <header><div class="headnav"><div class="kicker">Product portfolio / Interactive demos</div><a href="https://github.com/brendannyates" target="_blank" rel="noopener noreferrer">GitHub repositories</a></div>
-<h1>Ideas made operational.</h1><p>Browse original demos for clinical operations, team coordination and everyday productivity. Choose a demo. ESK, IR Portal, IVK and Sohar open their original pages with shared left navigation; the remaining previews use the demo workspace.</p></header>
+<h1>Ideas made operational.</h1><p>Browse original demos for clinical operations, team coordination and everyday productivity. Select a demo to open it in the workspace and switch between projects using the left sidebar.</p></header>
 <main><div class="controls"><input id="search" type="search" placeholder="Search demos or features..." aria-label="Search demos"><div class="filters" id="filters"></div></div><div class="count" id="count"></div><div class="grid" id="grid"></div>
 <div class="bottom"><span>Original demos are linked unchanged. Some applications require Excel for full use.</span><button id="copy">Copy all demo links</button></div></main>
 </div>
@@ -85,7 +85,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"
 function render(){ $("filters").innerHTML=filters.map(t=>'<button class="filter '+(t===selected?"active":"")+'" data-filter="'+esc(t)+'">'+esc(t)+'</button>').join("");
 const q=$("search").value.toLowerCase().trim(),items=entries.map((e,i)=>({e,i})).filter(({e})=>(selected==="All"||e[1]===selected)&&e.join(" ").toLowerCase().includes(q));
 $("count").textContent=items.length+" demos and applications";
-$("grid").innerHTML=items.length?items.map(({e,i})=>'<article class="card"><div class="top"><span class="type">'+esc(e[1])+'</span><span class="tag">'+esc(e[2])+'</span></div><h2>'+esc(e[0])+'</h2><p class="desc">'+esc(e[3])+'</p><button class="launch" data-id="'+i+'">Open demo workspace →</button></article>').join(""):'<p>No matching demos.</p>'}
+$("grid").innerHTML=items.length?items.map(({e,i})=>'<article class="card"><div class="top"><span class="type">'+esc(e[1])+'</span><span class="tag">'+esc(e[2])+'</span></div><h2>'+esc(e[0])+'</h2><p class="desc">'+esc(e[3])+'</p><button class="launch" data-id="'+i+'">'+(newTabDemos.has(e[0])?'Open in new tab ↗':'Open demo workspace →')+'</button></article>').join(""):'<p>No matching demos.</p>'}
 const loadedFrames=new Map();
 function frameFor(index){
  if(loadedFrames.has(index))return loadedFrames.get(index);
@@ -93,29 +93,21 @@ function frameFor(index){
  f.title=entries[index][0]+" original demo";
  f.setAttribute("referrerpolicy","strict-origin-when-cross-origin");
  f.setAttribute("allow","clipboard-read; clipboard-write; fullscreen");
- f.dataset.demoIndex=String(index);
- $("frames").appendChild(f);
- loadedFrames.set(index,f);
- f.src=entries[index][4];
- return f;
+ f.hidden=true;f.src=entries[index][4];$("frames").appendChild(f);
+ loadedFrames.set(index,f);return f;
 }
-function showcaseUrl(index) {
- const e=entries[index];const u=new URL(e[4]);
- if(e[0]==="IVK Tracker")u.pathname="/ivk-tracker/taskpane.html";
- u.searchParams.set("showcase","1");return u.href;
-}
+const newTabDemos=new Set(["ESK Tracker","IR Portal","IVK Tracker","Sohar Eligibility · Benefits"]);
 function show(index,push=true){
- if([1,2,6,7].includes(index)){window.location.assign(showcaseUrl(index));return;}
-
+ if(index<0||index>=entries.length)return;
+ if(newTabDemos.has(entries[index][0])){window.open(entries[index][4],"_blank","noopener,noreferrer");return;}
  if(index<0||index>=entries.length)return;current=index;
  const e=entries[index];$("workspace").hidden=false;$("library").hidden=true;document.body.style.overflow="hidden";
  $("viewTitle").textContent=e[0];$("viewCategory").textContent=e[1];$("external").href=e[4];
- const active=frameFor(index);
  for(const [i,f] of loadedFrames)f.hidden=i!==index;
- active.hidden=false;
+ frameFor(index).hidden=false;
  $("sidenav").innerHTML=entries.map((x,i)=>'<button data-id="'+i+'" '+(i===index?'aria-current="page"':'')+'>'+esc(x[0])+'<small>'+esc(x[1])+'</small></button>').join("");
  $("workspace").classList.remove("navopen");
- $("demoHint").textContent=e[0]==="IVK Tracker"?"IVK's original hosted app requires Excel on the web. This is the original application page, not a standalone fake-data demo.":"Original demo view. Open in new tab if embedding is blocked.";
+ $("demoHint").textContent=e[0]==="IVK Tracker"?"IVK's original hosted app requires Excel on the web. This is the original application page, not a standalone fake-data demo.":"Original demo embedded unchanged. Previously visited demos retain their state while you switch. Open in new tab if embedding is blocked.";
  if(push)history.pushState({demo:index},"","#demo="+index);
 }
 function home(push=true){current=-1;$("workspace").hidden=true;$("library").hidden=false;document.body.style.overflow="";if(push)history.pushState({},"",location.pathname+location.search)}
