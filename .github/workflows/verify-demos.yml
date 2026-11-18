@@ -1,4 +1,5 @@
 name: Verify demo showcase
+# Recheck after Sohar Pages successfully deployed
 on:
   push:
     paths:
