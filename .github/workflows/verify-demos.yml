@@ -44,6 +44,7 @@ jobs:
               try{
                 const f=await frame.elementHandle();
                 const cf=await f.contentFrame();
+                await cf?.waitForURL(/brendannyates\\.github\\.io\\//,{timeout:25000});
                 await cf?.waitForLoadState('domcontentloaded',{timeout:25000});
                 title=await cf?.title()||'';console.log('FRAMES',page.frames().map(x=>({url:x.url(),name:x.name()})));
                 body=(await cf?.locator('body').innerText({timeout:20000})||'').slice(0,150);
