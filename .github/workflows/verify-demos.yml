@@ -44,12 +44,13 @@ jobs:
               console.log('CHECK',JSON.stringify({name:item.name,status:response?.status(),nav,links,title,body}));
               if(response?.status()!==200||!nav||links!==8||!title.includes(item.title))problems.push(item.name);
             }
-            await page.locator('#demoHubNav nav a').filter({hasText:'ESK Tracker'}).click();
+            if(problems.length){await browser.close();console.log('PROBLEMS',JSON.stringify(problems));process.exitCode=1;return;}
+            await page.locator('#demoHubNav nav a').filter({hasText:'ESK Tracker'}).click({timeout:7000});
             await page.waitForURL(/esk-tracker\/taskpane\.html.*showcase=1/,{waitUntil:'commit',timeout:9000});
             await page.locator('#demoHubNav').waitFor({state:'attached',timeout:9000});
             console.log('SWITCH VERIFIED',page.url());
             await browser.close();
             console.log('PROBLEMS',JSON.stringify(problems));
             if(problems.length)process.exitCode=1;
-          })().catch(e=>{console.error(e);process.exitCode=1});
+          })().catch(e=>{console.error(e);process.exitCode=1;setTimeout(()=>process.exit(1),1000)});
           JS
