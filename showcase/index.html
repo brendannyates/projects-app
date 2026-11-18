@@ -93,15 +93,19 @@ function frameFor(index){
  f.title=entries[index][0]+" original demo";
  f.setAttribute("referrerpolicy","strict-origin-when-cross-origin");
  f.setAttribute("allow","clipboard-read; clipboard-write; fullscreen");
- f.hidden=true;f.src=entries[index][4];$("frames").appendChild(f);
- loadedFrames.set(index,f);return f;
+ f.dataset.demoIndex=String(index);
+ $("frames").appendChild(f);
+ loadedFrames.set(index,f);
+ f.src=entries[index][4];
+ return f;
 }
 function show(index,push=true){
  if(index<0||index>=entries.length)return;current=index;
  const e=entries[index];$("workspace").hidden=false;$("library").hidden=true;document.body.style.overflow="hidden";
  $("viewTitle").textContent=e[0];$("viewCategory").textContent=e[1];$("external").href=e[4];
+ const active=frameFor(index);
  for(const [i,f] of loadedFrames)f.hidden=i!==index;
- frameFor(index).hidden=false;
+ active.hidden=false;
  $("sidenav").innerHTML=entries.map((x,i)=>'<button data-id="'+i+'" '+(i===index?'aria-current="page"':'')+'>'+esc(x[0])+'<small>'+esc(x[1])+'</small></button>').join("");
  $("workspace").classList.remove("navopen");
  $("demoHint").textContent=e[0]==="IVK Tracker"?"IVK's original hosted app requires Excel on the web. This is the original application page, not a standalone fake-data demo.":"Original demo embedded unchanged. Previously visited demos retain their state while you switch. Open in new tab if embedding is blocked.";
