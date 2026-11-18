@@ -1,5 +1,4 @@
 name: Verify demo showcase
-# Recheck after Sohar Pages successfully deployed
 on:
   push:
     paths:
@@ -15,46 +14,40 @@ jobs:
         run: |
           npm install --no-save playwright@1.56.1
           npx playwright install chromium
-      - name: Verify published demo navigation
+      - name: Verify embedded gallery and external links
         run: |
           node <<'JS'
-          const {chromium} = require('playwright');
+          const {chromium}=require('playwright');
           (async()=>{
             const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
             const page=await browser.newPage({viewport:{width:1366,height:860}});
-            const base='https://brendannyates.github.io';
-            const problems=[];
-            page.on('console',m=>{if(m.type()==='error')console.log('CONSOLE',m.text().slice(0,500))});
-            page.on('response',r=>{if(r.url().includes('demo-nav.js'))console.log('NAV SCRIPT RESPONSE',r.status(),r.url())});
-            page.on('requestfailed',r=>{if(r.url().includes('demo-nav.js'))console.log('NAV SCRIPT FAILED',r.failure())});
-            const list=[
-              {name:'ESK Tracker',path:'/esk-tracker/taskpane.html?demo=1&showcase=1',title:'ESK Tracker'},
-              {name:'IR Portal',path:'/IR-Portal/taskpane.html?demo=1&showcase=1',title:'IR Portal'},
-              {name:'IVK Tracker',path:'/ivk-tracker/taskpane.html?showcase=1',title:'IVK Tracker'},
-              {name:'Sohar Eligibility',path:'/sohar-eligibility-addin/dashboard.html?fees=1&showcase=1#benefits',title:'Sohar'}
-            ];
-            const master=await page.goto(base+'/projects-app/showcase/',{waitUntil:'domcontentloaded',timeout:12000});
-            console.log('MASTER',master?.status(),await page.locator('#grid .card').count());
-            if(master?.status()!==200 || await page.locator('#grid .card').count()<8)problems.push('Master unavailable or missing items');
-            for(const item of list){
-              const response=await page.goto(base+item.path,{waitUntil:'commit',timeout:12000});
-              let nav=false, title='',links=0,body='';
-              try {
-                await page.locator('#demoHubNav').waitFor({state:'attached',timeout:18000});
-                nav=true;links=await page.locator('#demoHubNav nav a').count();
-              }catch(e){console.log('NAV ERROR',item.name,e.message.slice(0,200))}
-              try{title=await page.title();body=(await page.locator('body').innerText({timeout:10000})).slice(0,160)}catch(e){}
-              console.log('CHECK',JSON.stringify({name:item.name,status:response?.status(),nav,links,title,body}));
-              if(response?.status()!==200||!nav||links!==8||!title.includes(item.title))problems.push(item.name);
+            const url='https://brendannyates.github.io/projects-app/showcase/';
+            const res=await page.goto(url,{waitUntil:'domcontentloaded',timeout:15000});
+            if(res?.status()!==200)throw Error('Gallery not available: '+res?.status());
+            const cards=page.locator('#grid .card');
+            if(await cards.count()!==8)throw Error('Expected eight original entries');
+            const external=['ESK Tracker','IR Portal','IVK Tracker','Sohar Eligibility · Benefits'];
+            for(const name of external){
+              const card=cards.filter({has:page.locator('h2',{hasText:name})});
+              const btn=card.locator('button.launch');
+              if(!(await btn.innerText()).includes('new tab'))throw Error(name+' not marked as new tab');
+              const popupPromise=page.waitForEvent('popup',{timeout:8000});
+              await btn.click();
+              const popup=await popupPromise;
+              const opened=popup.url();
+              if(!opened.includes('brendannyates.github.io'))throw Error(name+' did not open its source');
+              console.log('NEW TAB',name,opened);
+              await popup.close();
+              if(!await page.locator('#library').isVisible())throw Error('Library closed when launching '+name);
             }
-            console.log('SCRIPT DIAGNOSTIC',await page.evaluate(()=>({ready:document.readyState,location:location.href,script:[...document.scripts].filter(s=>s.src.includes('demo-nav')).map(s=>s.src),nav:!!document.getElementById('demoHubNav')})));
-            if(problems.length){await browser.close();console.log('PROBLEMS',JSON.stringify(problems));process.exitCode=1;return;}
-            await page.locator('#demoHubNav nav a').filter({hasText:'ESK Tracker'}).click({timeout:7000});
-            await page.waitForURL(/esk-tracker\/taskpane\.html.*showcase=1/,{waitUntil:'commit',timeout:9000});
-            await page.locator('#demoHubNav').waitFor({state:'attached',timeout:9000});
-            console.log('SWITCH VERIFIED',page.url());
+            const internal=cards.filter({has:page.locator('h2',{hasText:'TMS Tracker'})});
+            await internal.locator('button.launch').click();
+            if(!await page.locator('#sidenav').isVisible())throw Error('Embedded sidebar is missing');
+            if(!await page.locator('#frames iframe:not([hidden])').count())throw Error('Embedded iframe missing');
+            console.log('EMBEDDED',await page.locator('#viewTitle').innerText(),await page.locator('#frames iframe:not([hidden])').getAttribute('src'));
+            await page.locator('#exit').click();
+            if(!await page.locator('#library').isVisible())throw Error('Gallery not restored');
             await browser.close();
-            console.log('PROBLEMS',JSON.stringify(problems));
-            if(problems.length)process.exitCode=1;
-          })().catch(e=>{console.error(e);process.exitCode=1;setTimeout(()=>process.exit(1),1000)});
+            console.log('ALL CHECKS PASSED');
+          })().catch(e=>{console.error(e);process.exit(1)});
           JS
