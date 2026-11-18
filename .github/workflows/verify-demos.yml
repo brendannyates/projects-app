@@ -8,7 +8,7 @@ on:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 4
     steps:
       - name: Install Playwright
         run: |
@@ -30,14 +30,14 @@ jobs:
               {name:'IVK Tracker',path:'/ivk-tracker/taskpane.html?showcase=1',title:'IVK Tracker'},
               {name:'Sohar Eligibility',path:'/sohar-eligibility-addin/dashboard.html?fees=1&showcase=1#benefits',title:'Sohar'}
             ];
-            const master=await page.goto(base+'/projects-app/showcase/',{waitUntil:'domcontentloaded',timeout:50000});
+            const master=await page.goto(base+'/projects-app/showcase/',{waitUntil:'domcontentloaded',timeout:12000});
             console.log('MASTER',master?.status(),await page.locator('#grid .card').count());
             if(master?.status()!==200 || await page.locator('#grid .card').count()<8)problems.push('Master unavailable or missing items');
             for(const item of list){
-              const response=await page.goto(base+item.path,{waitUntil:'commit',timeout:50000});
+              const response=await page.goto(base+item.path,{waitUntil:'commit',timeout:12000});
               let nav=false, title='',links=0,body='';
               try {
-                await page.locator('#demoHubNav').waitFor({state:'visible',timeout:25000});
+                await page.locator('#demoHubNav').waitFor({state:'attached',timeout:6000});
                 nav=true;links=await page.locator('#demoHubNav nav a').count();
               }catch(e){console.log('NAV ERROR',item.name,e.message.slice(0,200))}
               try{title=await page.title();body=(await page.locator('body').innerText({timeout:10000})).slice(0,160)}catch(e){}
@@ -45,8 +45,8 @@ jobs:
               if(response?.status()!==200||!nav||links!==8||!title.includes(item.title))problems.push(item.name);
             }
             await page.locator('#demoHubNav nav a').filter({hasText:'ESK Tracker'}).click();
-            await page.waitForURL(/esk-tracker\/taskpane\.html.*showcase=1/,{waitUntil:'commit',timeout:30000});
-            await page.locator('#demoHubNav').waitFor({state:'visible',timeout:30000});
+            await page.waitForURL(/esk-tracker\/taskpane\.html.*showcase=1/,{waitUntil:'commit',timeout:9000});
+            await page.locator('#demoHubNav').waitFor({state:'attached',timeout:9000});
             console.log('SWITCH VERIFIED',page.url());
             await browser.close();
             console.log('PROBLEMS',JSON.stringify(problems));
