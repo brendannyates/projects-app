@@ -25,6 +25,8 @@ jobs:
             const page = await browser.newPage({viewport:{width:1440,height:900}});
             const errors=[];
             page.on('pageerror',e=>errors.push(e.message));
+            page.on('console',m=>{if(m.type()==='error')console.log('CONSOLE',m.text().slice(0,400))});
+            page.on('response',r=>{if(r.url().includes('github.io') && r.request().resourceType()==='document')console.log('DOC',r.status(),r.url(),JSON.stringify({xfo:r.headers()['x-frame-options'],csp:r.headers()['content-security-policy']}))});
             const response=await page.goto(process.env.MASTER,{waitUntil:'domcontentloaded',timeout:45000});
             console.log('MASTER:',response?.status(),page.url());
             if(!response || response.status()>=400) throw Error('Master unavailable');
@@ -43,7 +45,7 @@ jobs:
                 const f=await frame.elementHandle();
                 const cf=await f.contentFrame();
                 await cf?.waitForLoadState('domcontentloaded',{timeout:25000});
-                title=await cf?.title()||'';
+                title=await cf?.title()||'';console.log('FRAMES',page.frames().map(x=>({url:x.url(),name:x.name()})));
                 body=(await cf?.locator('body').innerText({timeout:20000})||'').slice(0,150);
               }catch(e){body='LOAD ERROR: '+e.message}
               results.push({name,sidebar,frameURL,status:frameResponse.status(),title,body});
