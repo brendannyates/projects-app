@@ -13,49 +13,43 @@ jobs:
       - name: Install Playwright
         run: |
           npm install --no-save playwright@1.56.1
-          npx playwright install --with-deps chromium
-      - name: Test published gallery and embedded demos
-        env:
-          MASTER: https://brendannyates.github.io/projects-app/showcase/
+          npx playwright install chromium
+      - name: Verify published demo navigation
         run: |
           node <<'JS'
-          const { chromium } = require('playwright');
-          (async () => {
-            const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
-            const page = await browser.newPage({viewport:{width:1440,height:900}});
-            const errors=[];
-            page.on('pageerror',e=>errors.push(e.message));
-            page.on('console',m=>{if(m.type()==='error')console.log('CONSOLE',m.text().slice(0,400))});
-            page.on('response',r=>{if(r.url().includes('github.io') && r.request().resourceType()==='document')console.log('DOC',r.status(),r.url(),JSON.stringify({xfo:r.headers()['x-frame-options'],csp:r.headers()['content-security-policy']}))});
-            const response=await page.goto(process.env.MASTER,{waitUntil:'domcontentloaded',timeout:45000});
-            console.log('MASTER:',response?.status(),page.url());
-            if(!response || response.status()>=400) throw Error('Master unavailable');
-            const names=['ESK Tracker','IR Portal','IVK Tracker','Sohar Eligibility · Benefits'];
-            const results=[];
-            for(const name of names) {
-              const item=page.locator('#grid .card').filter({has:page.locator('h2', {hasText:name})}).first();
-              await item.locator('button.launch').click();
-              await page.waitForTimeout(1000);
-              const sidebar=await page.locator('#sidenav').isVisible();
-              const frame=page.locator('#frames iframe:not([hidden])');
-              const frameURL=await frame.getAttribute('src');
-              const frameResponse=await page.request.get(frameURL,{timeout:25000}).catch(e=>({status:()=>0,error:e.message}));
-              let title='',body='';
-              try{
-                const f=await frame.elementHandle();
-                const cf=await f.contentFrame();
-                await cf?.waitForURL(url => url.toString().includes('brendannyates.github.io/'),{waitUntil:'commit',timeout:40000});
-                await cf?.waitForLoadState('domcontentloaded',{timeout:20000}).catch(e=>console.log('DOMCONTENTLOADED TIMEOUT',e.message.slice(0,100)));
-                title=await cf?.title()||'';console.log('FRAMES',page.frames().map(x=>({url:x.url(),name:x.name()})));
-                body=(await cf?.locator('body').innerText({timeout:20000})||'').slice(0,150);
-              }catch(e){body='LOAD ERROR: '+e.message}
-              results.push({name,sidebar,frameURL,status:frameResponse.status(),title,body});
-              console.log('RESULT',JSON.stringify(results.at(-1)));
-              await page.locator('#exit').click();
+          const {chromium} = require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+            const page=await browser.newPage({viewport:{width:1366,height:860}});
+            const base='https://brendannyates.github.io';
+            const problems=[];
+            page.on('console',m=>{if(m.type()==='error')console.log('CONSOLE',m.text().slice(0,300))});
+            const list=[
+              {name:'ESK Tracker',path:'/esk-tracker/taskpane.html?demo=1&showcase=1',title:'ESK Tracker'},
+              {name:'IR Portal',path:'/IR-Portal/taskpane.html?demo=1&showcase=1',title:'IR Portal'},
+              {name:'IVK Tracker',path:'/ivk-tracker/taskpane.html?showcase=1',title:'IVK Tracker'},
+              {name:'Sohar Eligibility',path:'/sohar-eligibility-addin/dashboard.html?fees=1&showcase=1#benefits',title:'Sohar'}
+            ];
+            const master=await page.goto(base+'/projects-app/showcase/',{waitUntil:'domcontentloaded',timeout:50000});
+            console.log('MASTER',master?.status(),await page.locator('#grid .card').count());
+            if(master?.status()!==200 || await page.locator('#grid .card').count()<8)problems.push('Master unavailable or missing items');
+            for(const item of list){
+              const response=await page.goto(base+item.path,{waitUntil:'commit',timeout:50000});
+              let nav=false, title='',links=0,body='';
+              try {
+                await page.locator('#demoHubNav').waitFor({state:'visible',timeout:25000});
+                nav=true;links=await page.locator('#demoHubNav nav a').count();
+              }catch(e){console.log('NAV ERROR',item.name,e.message.slice(0,200))}
+              try{title=await page.title();body=(await page.locator('body').innerText({timeout:10000})).slice(0,160)}catch(e){}
+              console.log('CHECK',JSON.stringify({name:item.name,status:response?.status(),nav,links,title,body}));
+              if(response?.status()!==200||!nav||links!==8||!title.includes(item.title))problems.push(item.name);
             }
-            const ok=results.every(x=>x.sidebar && x.status===200 && x.title.length>0);
-            console.log('JS ERRORS',JSON.stringify(errors.slice(0,10)));
+            await page.locator('#demoHubNav nav a').filter({hasText:'ESK Tracker'}).click();
+            await page.waitForURL(/esk-tracker\/taskpane\.html.*showcase=1/,{waitUntil:'commit',timeout:30000});
+            await page.locator('#demoHubNav').waitFor({state:'visible',timeout:30000});
+            console.log('SWITCH VERIFIED',page.url());
             await browser.close();
-            if(!ok)process.exitCode=1;
+            console.log('PROBLEMS',JSON.stringify(problems));
+            if(problems.length)process.exitCode=1;
           })().catch(e=>{console.error(e);process.exitCode=1});
           JS
