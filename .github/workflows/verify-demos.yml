@@ -1,0 +1,58 @@
+name: Verify demo showcase
+on:
+  push:
+    paths:
+      - 'showcase/**'
+      - '.github/workflows/verify-demos.yml'
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Install Playwright
+        run: |
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - name: Test published gallery and embedded demos
+        env:
+          MASTER: https://brendannyates.github.io/projects-app/showcase/
+        run: |
+          node <<'JS'
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+            const page = await browser.newPage({viewport:{width:1440,height:900}});
+            const errors=[];
+            page.on('pageerror',e=>errors.push(e.message));
+            const response=await page.goto(process.env.MASTER,{waitUntil:'domcontentloaded',timeout:45000});
+            console.log('MASTER:',response?.status(),page.url());
+            if(!response || response.status()>=400) throw Error('Master unavailable');
+            const names=['ESK Tracker','IR Portal','IVK Tracker','Sohar Eligibility · Benefits'];
+            const results=[];
+            for(const name of names) {
+              const item=page.locator('#grid .card').filter({has:page.locator('h2', {hasText:name})}).first();
+              await item.locator('button.launch').click();
+              await page.waitForTimeout(1000);
+              const sidebar=await page.locator('#sidenav').isVisible();
+              const frame=page.locator('#frames iframe:not([hidden])');
+              const frameURL=await frame.getAttribute('src');
+              const frameResponse=await page.request.get(frameURL,{timeout:25000}).catch(e=>({status:()=>0,error:e.message}));
+              let title='',body='';
+              try{
+                const f=await frame.elementHandle();
+                const cf=await f.contentFrame();
+                await cf?.waitForLoadState('domcontentloaded',{timeout:25000});
+                title=await cf?.title()||'';
+                body=(await cf?.locator('body').innerText({timeout:20000})||'').slice(0,150);
+              }catch(e){body='LOAD ERROR: '+e.message}
+              results.push({name,sidebar,frameURL,status:frameResponse.status(),title,body});
+              console.log('RESULT',JSON.stringify(results.at(-1)));
+              await page.locator('#exit').click();
+            }
+            const ok=results.every(x=>x.sidebar && x.status===200 && x.title.length>0);
+            console.log('JS ERRORS',JSON.stringify(errors.slice(0,10)));
+            await browser.close();
+            if(!ok)process.exitCode=1;
+          })().catch(e=>{console.error(e);process.exitCode=1});
+          JS
