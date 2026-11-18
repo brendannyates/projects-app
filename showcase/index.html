@@ -48,7 +48,7 @@ h2{font-size:22px;letter-spacing:-.035em;margin:2px 0}
 .viewactions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .viewactions a,.viewactions button{border:1px solid #cbdcd2;border-radius:8px;padding:10px 12px;text-decoration:none;color:#205c49;background:#fff;font-size:13px;white-space:nowrap}
 .viewactions a:hover,.viewactions button:hover{background:#e6f1eb}
-#iframe{width:100%;height:100%;border:0;background:white;flex:1}
+.frames{position:relative;flex:1;min-height:0;background:#fff}.frames iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff}.frames iframe[hidden]{display:none!important}
 .vnote{font-size:12px;padding:8px 17px;background:#e9f0eb;color:#51685c;border-top:1px solid #dce7de}
 #mobiletoggle{display:none}
 @media(max-width:760px){
@@ -73,8 +73,8 @@ header{padding:37px 24px}main{padding:24px 16px 55px}input{width:100%;min-width:
 <aside class="side" id="side"><div class="sidehead"><strong>Demo Library</strong><small>Switch between original demos</small></div><nav id="sidenav" aria-label="Choose demo"></nav><div class="sidefoot"><button id="backLibrary">← All demos</button></div></aside>
 <div class="viewer"><div class="viewhead"><div class="viewactions"><button id="mobiletoggle" aria-label="Toggle demo navigation">☰ Demos</button><div><strong id="viewTitle"></strong><span id="viewCategory"></span></div></div>
 <div class="viewactions"><button id="reload" title="Reload the current demo">↻ Reload</button><a id="external" href="#" target="_blank" rel="noopener noreferrer">Open in new tab ↗</a><button id="exit" aria-label="Back to all demos">✕</button></div></div>
-<iframe id="iframe" title="Selected original demo" referrerpolicy="strict-origin-when-cross-origin" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
-<div class="vnote">Showing the original hosted application. If a demo doesn't display in the viewer, select “Open in new tab.”</div>
+<div id="frames" class="frames" aria-label="Embedded original demos"></div>
+<div class="vnote" id="demoHint">Original demos open in the embedded viewer. Use Open in new tab if necessary.</div>
 </div></section>
 <script>
 const entries=[["TMS Tracker","Treatment operations","Original interactive demo","Your uploaded TMS v2 demo, hosted unchanged with invented data","https://brendannyates.github.io/tms-tracker/demo-v2-original.html"],["ESK Tracker","Treatment operations","Original demo","Original ESK Tracker demo mode","https://brendannyates.github.io/esk-tracker/taskpane.html?demo=1"],["IR Portal","Operations","Original demo","Original IR Portal demo mode","https://brendannyates.github.io/IR-Portal/taskpane.html?demo=1"],["MHS Clinic App","Clinic workspace","Original demo","Original Clinic App demo, opening in Binder","https://brendannyates.github.io/mhs-clinic-app/?demo=1#binder"],["Projects App","Productivity","Original demo","Original project and task management demo mode","https://brendannyates.github.io/projects-app/?demo=1"],["Bay Map Builder","Planning tools","Original standalone app","Original interactive map builder","https://brendannyates.github.io/bay-map-builder/"],["IVK Tracker","Excel-dependent","Original hosted app","Original tracker app; not a standalone demo and requires Excel on the web for full use","https://brendannyates.github.io/ivk-tracker/"],["Sohar Eligibility · Benefits","Eligibility and benefits","Original demo","Existing Sohar Eligibility benefits dashboard with fictional fee schedule","https://brendannyates.github.io/sohar-eligibility-addin/dashboard.html?fees=1&utm_source=chatgpt.com#benefits"]];
@@ -86,15 +86,35 @@ function render(){ $("filters").innerHTML=filters.map(t=>'<button class="filter 
 const q=$("search").value.toLowerCase().trim(),items=entries.map((e,i)=>({e,i})).filter(({e})=>(selected==="All"||e[1]===selected)&&e.join(" ").toLowerCase().includes(q));
 $("count").textContent=items.length+" demos and applications";
 $("grid").innerHTML=items.length?items.map(({e,i})=>'<article class="card"><div class="top"><span class="type">'+esc(e[1])+'</span><span class="tag">'+esc(e[2])+'</span></div><h2>'+esc(e[0])+'</h2><p class="desc">'+esc(e[3])+'</p><button class="launch" data-id="'+i+'">Open demo workspace →</button></article>').join(""):'<p>No matching demos.</p>'}
-function show(index,push=true){if(index<0||index>=entries.length)return;current=index;const e=entries[index];$("workspace").hidden=false;$("library").hidden=true;document.body.style.overflow="hidden";$("viewTitle").textContent=e[0];$("viewCategory").textContent=e[1];$("external").href=e[4];$("iframe").src=e[4];$("iframe").title=e[0]+" original demo";$("sidenav").innerHTML=entries.map((x,i)=>'<button data-id="'+i+'" '+(i===index?'aria-current="page"':'')+'>'+esc(x[0])+'<small>'+esc(x[1])+'</small></button>').join("");$("workspace").classList.remove("navopen");if(push)history.pushState({demo:index},"","#demo="+index)}
-function home(push=true){current=-1;$("workspace").hidden=true;$("library").hidden=false;$("iframe").removeAttribute("src");document.body.style.overflow="";if(push)history.pushState({},"",location.pathname+location.search)}
+const loadedFrames=new Map();
+function frameFor(index){
+ if(loadedFrames.has(index))return loadedFrames.get(index);
+ const f=document.createElement("iframe");
+ f.title=entries[index][0]+" original demo";
+ f.setAttribute("referrerpolicy","strict-origin-when-cross-origin");
+ f.setAttribute("allow","clipboard-read; clipboard-write; fullscreen");
+ f.hidden=true;f.src=entries[index][4];$("frames").appendChild(f);
+ loadedFrames.set(index,f);return f;
+}
+function show(index,push=true){
+ if(index<0||index>=entries.length)return;current=index;
+ const e=entries[index];$("workspace").hidden=false;$("library").hidden=true;document.body.style.overflow="hidden";
+ $("viewTitle").textContent=e[0];$("viewCategory").textContent=e[1];$("external").href=e[4];
+ for(const [i,f] of loadedFrames)f.hidden=i!==index;
+ frameFor(index).hidden=false;
+ $("sidenav").innerHTML=entries.map((x,i)=>'<button data-id="'+i+'" '+(i===index?'aria-current="page"':'')+'>'+esc(x[0])+'<small>'+esc(x[1])+'</small></button>').join("");
+ $("workspace").classList.remove("navopen");
+ $("demoHint").textContent=e[0]==="IVK Tracker"?"IVK's original hosted app requires Excel on the web. This is the original application page, not a standalone fake-data demo.":"Original demo embedded unchanged. Previously visited demos retain their state while you switch. Open in new tab if embedding is blocked.";
+ if(push)history.pushState({demo:index},"","#demo="+index);
+}
+function home(push=true){current=-1;$("workspace").hidden=true;$("library").hidden=false;document.body.style.overflow="";if(push)history.pushState({},"",location.pathname+location.search)}
 $("grid").addEventListener("click",e=>{const b=e.target.closest("button[data-id]");if(b)show(+b.dataset.id)});
 $("sidenav").addEventListener("click",e=>{const b=e.target.closest("button[data-id]");if(b)show(+b.dataset.id)});
 $("filters").addEventListener("click",e=>{const b=e.target.closest("button[data-filter]");if(b){selected=b.dataset.filter;render()}});
 $("search").addEventListener("input",render);
 $("mobiletoggle").addEventListener("click",()=>$("workspace").classList.toggle("navopen"));
 $("backLibrary").addEventListener("click",()=>home());$("exit").addEventListener("click",()=>home());
-$("reload").addEventListener("click",()=>{if(current>=0)$("iframe").src=entries[current][4]});
+$("reload").addEventListener("click",()=>{if(current>=0)loadedFrames.get(current).src=entries[current][4]});
 $("copy").addEventListener("click",async()=>{const value=entries.map(x=>x[0]+": "+x[4]).join("\n");try{await navigator.clipboard.writeText(value);$("copy").textContent="Copied"}catch{$("copy").textContent="Copy unavailable"}});
 function sync(){const m=location.hash.match(/^#demo=(\d+)$/);if(m&&entries[+m[1]])show(+m[1],false);else home(false)}
 window.addEventListener("popstate",sync);window.addEventListener("hashchange",sync);render();sync();
