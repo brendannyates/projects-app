@@ -27,7 +27,12 @@ jobs:
             page.on('console',m=>{if(m.type()==='error')console.log('CONSOLE',m.text().slice(0,500))});
             page.on('response',r=>{if(r.url().includes('demo-nav.js'))console.log('NAV SCRIPT RESPONSE',r.status(),r.url())});
             page.on('requestfailed',r=>{if(r.url().includes('demo-nav.js'))console.log('NAV SCRIPT FAILED',r.failure())});
-            const list=[{name:'Sohar Eligibility',path:'/sohar-eligibility-addin/dashboard.html?fees=1&showcase=1#benefits',title:'Sohar'}];
+            const list=[
+              {name:'ESK Tracker',path:'/esk-tracker/taskpane.html?demo=1&showcase=1',title:'ESK Tracker'},
+              {name:'IR Portal',path:'/IR-Portal/taskpane.html?demo=1&showcase=1',title:'IR Portal'},
+              {name:'IVK Tracker',path:'/ivk-tracker/taskpane.html?showcase=1',title:'IVK Tracker'},
+              {name:'Sohar Eligibility',path:'/sohar-eligibility-addin/dashboard.html?fees=1&showcase=1#benefits',title:'Sohar'}
+            ];
             const master=await page.goto(base+'/projects-app/showcase/',{waitUntil:'domcontentloaded',timeout:12000});
             console.log('MASTER',master?.status(),await page.locator('#grid .card').count());
             if(master?.status()!==200 || await page.locator('#grid .card').count()<8)problems.push('Master unavailable or missing items');
